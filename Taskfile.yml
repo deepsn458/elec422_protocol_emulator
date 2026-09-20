@@ -1,0 +1,40 @@
+version: '3'
+
+vars:
+  DOCKER_IMAGE: elec422-protocol-emulator:dev
+  DOCKER_CLI:
+    sh: |
+      if docker info >/dev/null 2>&1; then
+        printf docker
+      else
+        for cli in /mnt/c/Users/*/AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe; do
+          if [ -x "$cli" ]; then
+            printf '%s' "$cli"
+            exit 0
+          fi
+        done
+        exit 1
+      fi
+  MOUNT_SOURCE:
+    sh: |
+      if [ "{{.DOCKER_CLI}}" = docker ]; then
+        printf '%s' '{{.ROOT_DIR}}'
+      else
+        wslpath -w '{{.ROOT_DIR}}'
+      fi
+
+tasks:
+  docker:build:
+    desc: Build the development container image
+    cmds:
+      - '"{{.DOCKER_CLI}}" build -f .devcontainer/Dockerfile -t {{.DOCKER_IMAGE}} .'
+
+  docker:run:
+    desc: Open a shell with the development tools active
+    interactive: true
+    cmds:
+      - >-
+        "{{.DOCKER_CLI}}" run --rm -it --memory=10GB
+        --mount 'type=bind,source={{.MOUNT_SOURCE}},target=/workspace'
+        -w /workspace {{.DOCKER_IMAGE}}
+        bash -c 'source /ttsetup/venv/bin/activate && exec bash -i'
