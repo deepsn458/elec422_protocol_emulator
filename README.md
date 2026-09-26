@@ -10,6 +10,29 @@ Tiny Tapeout is an educational project that aims to make it easier and cheaper t
 
 To learn more and get started, visit https://tinytapeout.com.
 
+## Project setup
+
+Install these on your host before running local RTL simulations:
+
+- [Docker](https://docs.docker.com/get-docker/) with the Docker engine running. On Windows, use Docker Desktop with Linux containers and [enable WSL integration](https://docs.docker.com/desktop/features/wsl/) for the distro containing this repository.
+- [Task](https://taskfile.dev/docs/installation/) in the terminal where you will run the commands below.
+
+From the repository root, build the development image and open a container shell:
+
+```sh
+task docker:build
+task docker:run
+```
+
+The repository is available at `/workspace` in the container, and the Python virtual environment is active automatically. Run the RTL simulation from that shell:
+
+```sh
+cd /workspace/test
+make -B
+```
+
+Use `exit` to leave the container. See [test/README.md](test/README.md) for more simulation options.
+
 ## Set up your Verilog project
 
 1. Add your Verilog files to the `src` folder.
