@@ -28,13 +28,18 @@ jobs:
           cd test
           make clean
           make
-          # make will return success even if the test fails, so check for failure in the results.xml
-          ! grep failure results.xml
+          # make can return success even if cocotb reports a failure.
+          ! grep failure ../sim_outputs/rtl/cocotb/results.xml
+
+      - name: Run SystemVerilog test
+        run: make -C test FLOW=sv
 
       - name: Test Summary
         uses: test-summary/action@v2.4
         with:
-          paths: "test/results.xml"
+          paths: |
+            sim_outputs/rtl/cocotb/results.xml
+            sim_outputs/modules/cocotb/*/results.xml
         if: always()
 
       - name: upload waveform and test results
@@ -43,6 +48,4 @@ jobs:
         with:
           name: test-results
           path: |
-            test/tb.fst
-            test/results.xml
-            test/output/*
+            sim_outputs/

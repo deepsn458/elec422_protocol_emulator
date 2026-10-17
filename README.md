@@ -28,8 +28,16 @@ The repository is available at `/workspace` in the container, and the Python vir
 
 ```sh
 cd /workspace/test
-make -B
+make
 ```
+
+Pass `FLOW=sv` to run the stimulus and checks in `test/tb.v` instead of the default cocotb test:
+
+```sh
+make FLOW=sv
+```
+
+The default command also runs module tests discovered in `test/modules/`. Run one directly with `make sim_tb_fifo` from `test/`; see [test/README.md](test/README.md).
 
 Use `exit` to leave the container. See [test/README.md](test/README.md) for more simulation options.
 

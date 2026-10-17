@@ -1,47 +1,62 @@
-# Sample testbench for a Tiny Tapeout project
+# Simulation tests
 
-This is a sample testbench for a Tiny Tapeout project. It uses [cocotb](https://docs.cocotb.org/en/stable/) to drive the DUT and check the outputs.
-See below to get started or for more information, check the [website](https://tinytapeout.com/hdl/testing/).
+The project and its modules can be tested with [cocotb](https://docs.cocotb.org/en/stable/) or with stimulus and checks written in the HDL testbench. Run the commands below from `test/` inside the development container.
 
-## Setting up
+## Setup
 
-1. Edit [Makefile](Makefile) and modify `PROJECT_SOURCES` to point to your Verilog files.
-2. Edit [tb.v](tb.v) and replace `tt_um_example` with your module name.
+1. Set `PROJECT_SOURCES` in [Makefile](Makefile) to your top level Verilog files.
+2. Update the DUT instance in [tb.v](tb.v) to match your top level module.
 
-## How to run
+## Module-level simulations
 
-To run the RTL simulation:
-
-```sh
-make -B
-```
-
-To run gatelevel simulation, first harden your project and copy `../runs/wokwi/results/final/verilog/gl/{your_module_name}.v` to `gate_level_netlist.v`.
-
-Then run:
+For a module named `fifo`, place its RTL at `src/modules/fifo.sv` and its testbench at `test/modules/tb_fifo.sv`. To run the SystemVerilog stimulus and checks and produce a VCD waveform:
 
 ```sh
-make -B GATES=yes
+make sim_tb_fifo FLOW=sv FST=
 ```
 
-If you wish to save the waveform in VCD format instead of FST format, edit tb.v to use `$dumpfile("tb.vcd");` and then run:
+Pass `FLOW=sv` for this SV run and `FST=` for VCD output. Leaving `FST` at its default produces an FST waveform. Separate compiled executables for VCD and FST are cached under `../sim_outputs/modules/sv/`. Within each format, the executable is rebuilt only when the testbench or RTL changes; the simulation runs on every invocation.
+
+For a cocotb module test, add `test/modules/test_fifo.py` and run:
 
 ```sh
-make -B FST=
+make cocotb_tb_fifo
 ```
 
-This will generate `tb.vcd` instead of `tb.fst`.
+Each module cocotb run uses its matching `tb_<name>.sv`, `src/modules/<name>.sv`, and `test_<name>.py`. Its build, waveform, and results are under `../sim_outputs/modules/cocotb/<name>/`.
 
-## How to view the waveform file
+## Top-level simulations
 
-Using GTKWave
+Run `make` to execute all discovered module tests and the top level cocotb test in `test.py`:
 
 ```sh
-gtkwave tb.fst tb.gtkw
+make
 ```
 
-Using Surfer
+To run the stimulus and checks in `tb.v` instead of the top level cocotb test:
 
 ```sh
-surfer tb.fst
+make FLOW=sv
 ```
+
+Add `FST=` to use VCD output. If switching a previously compiled top level run between FST and VCD, use `make -B FLOW=sv FST=` to recompile it with the new waveform filename. The Makefile defines `SV_TEST` only for SV runs, keeping HDL stimulus inactive during cocotb tests.
+
+For gate level simulation, first harden the project and copy `../runs/wokwi/results/final/verilog/gl/{your_module_name}.v` to `gate_level_netlist.v`. Then run `make GATES=yes`, with `FLOW=sv` if you want the HDL testbench.
+
+All generated builds, waveforms, and results are stored under the repository root's ignored `sim_outputs/` directory. `sim_build` is cocotb's conventional directory for compiled simulator files; this Makefile redirects those files to `sim_outputs/`. A `test/sim_build/` directory from an older run is no longer used.
+
+## Viewing waveforms
+
+To view the default top level cocotb waveform with GTKWave:
+
+```sh
+gtkwave ../sim_outputs/rtl/cocotb/tb.fst tb.gtkw
+```
+
+Or use Surfer:
+
+```sh
+surfer ../sim_outputs/rtl/cocotb/tb.fst
+```
+
+The FIFO SV VCD waveform is at `../sim_outputs/modules/sv/fifo.vcd` after running the module command above.
