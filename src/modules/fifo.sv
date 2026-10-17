@@ -1,100 +1,55 @@
-*   w_data[31:0], pull (r_en), push(w_en), w_clk, r_clk, r_rst, w_rst
-* Output ports
-*   r_data[31:0], full, empty, level[2:0]
+/*
+* 4-word 32-bit synchronous FIFO
+* Inputs:
+    * d_in: 32-bit input word
+    * w_en: write enable signal
+    * clk: clock input
+    * rst: reset input
+* Outputs:
+    * d_out: 32-bit output word
+    * full: signal asserted if the fifo is full
+    * empty: signal asserted if the fifo is empty
+    * w_ptr: the current position of the write pointer
+    * r_ptr: the current position of the read pointer
 */
+module fifo #(
+    parameter DEPTH=4,
+    parameter DATA_WIDTH=32,
+    parameter DEPTH_BITS = $clog2(DEPTH))(
+    input wire clk,
+    input wire rst,
+    input wire [DATA_WIDTH-1:0] d_in,
+    input wire w_en,
+    input wire r_en,
+    output reg [DATA_WIDTH-1:0] d_out,
+    output reg [DEPTH_BITS:0] wptr,
+    output reg [DEPTH_BITS:0] rptr
+    );
 
-module async_fifo #(parameter DEPTH=4, parameter DATA_WIDTH=32) (
-    
-    parameter DEPTH_BITS = $clog2(DEPTH);
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+    reg full, empty;
+    assign empty = (wptr == rptr);
+    assign full = ({~wptr[DEPTH_BITS], wptr[DEPTH_BITS-1:0]} == rptr);
 
-    input wire w_clk,
-    input wire r_clk,
-    input wire[DATA_WIDTH-1:0] w_data,
-    input wire w_en, //push
-    input wire r_en, //pull
-    input wire r_rst,
-    input wire w_rst,
-    output wire [DEPTH_BITS:0] b_wptr,
-    output wire [DEPTH_BITS:0] b_rptr,
-    output wire [DATA_WIDTH-1:0] r_data
-);
-
-
-reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
-reg full, empty;
-
-reg [DEPTH_BITS:0] g_wptr_next, g_wptr, g_wptr_sync;
-reg [DEPTH_BITS:0] g_rptr_next, g_rptr, g_rptr_sync;
-reg [DEPTH_BITS:0] b_wptr_next, b_rptr_next;
-
-/* Main fifo logic */
-always @(posedge w_clk) begin
-    if (w_en & !full) begin
-        mem[b_wptr[DEPTH_BITS-1:0]] <= w_data;
+    //write data
+    always @ (posedge clk) begin
+        if (rst) begin
+            wptr <= '0;
+            d_out <= '0;
+        end else if (w_en & !full) begin
+            mem[wptr[DEPTH_BITS-1:0]] <= d_in;
+            wptr <= wptr + 1;
+        end
     end
-end
 
-assign r_data  = mem[b_rptr[DEPTH_BITS-1:0]];
-
-/* write pointer handler */
-wire full_next;
-
-assign full_next = (g_wptr_next == {~g_rptr_sync[DEPTH_BITS:DEPTH_BITS-1], g_rptr_sync[DEPTH_BITS-2:0]});
-assign b_wptr_next = (w_en & !full) ? (b_wptr + 1) : b_wptr;
-assign g_wptr_next = b_wptr_next ^ (b_wptr_next >> 1);
-
-always @ (posedge w_clk) begin 
-    if (w_rst) begin
-        b_wptr <= 0;
-        full <= 0;
-        g_wptr <= 0;
-    end else begin
-        b_wptr <= b_wptr_next;
-        full <= full_next;
-        g_wptr <= g_wptr_next;
+    //read data
+    always @ (posedge clk) begin
+        if (rst) begin
+            rptr <= '0;
+        end else if (r_en & !empty) begin
+            d_out <= mem[rptr[DEPTH_BITS-1:0]];
+            rptr <= rptr + 1;
+        end
     end
-end
-
-/* read pointer handler */
-wire empty_next;
-assign empty_next = (g_wptr_sync == g_rptr_next);
-assign b_rptr_next = (r_en & !empty) ? (b_rptr+1) : b_rptr;
-assign g_rptr_next = b_rptr_next ^ (b_rptr_next >> 1);
-
-always @(posedge r_clk) begin
-    if (r_rst) begin
-        b_rptr <= 0;
-        empty <= 1;
-        g_rptr <= 0;
-    end else begin
-        b_rptr <= b_rptr_next;
-        empty <= empty_next;
-        g_rptr <= g_rptr_next;
-    end
-end
-
-/*synchronizers*/
-reg [DEPTH_BITS:0] g_wptr_ff;
-reg [DEPTH_BITS:0] g_rptr_ff;
-
-always @(posedge w_clk) begin
-    if (w_rst) begin
-        g_wptr_ff <= 0;
-        g_wptr_sync <= 0;
-    end else begin
-        g_wptr_ff <= g_wptr;
-        g_wptr_sync <= g_wptr_ff;
-    end
-end
-
-always @ (posedge r_clk) begin
-    if (r_rst) begin
-        g_rptr_ff <= 0;
-        g_rptr_sync <= 0;
-    end else begin
-        g_rptr_ff <= g_rptr;
-        g_rptr_sync <= g_rptr_ff;
-    end
-end
 
 endmodule
