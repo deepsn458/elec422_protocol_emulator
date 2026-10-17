@@ -1,14 +1,16 @@
 `default_nettype none
 `timescale 1ns / 1ps
+`ifndef TB_DUMPFILE
+`define TB_DUMPFILE "tb.fst"
+`endif
 
-/* This testbench just instantiates the module and makes some convenient wires
-   that can be driven / tested by the cocotb test.py.
-*/
+/* The DUT wiring is shared by cocotb and the optional SystemVerilog test.
+   With FLOW=sv, the Makefile defines SV_TEST to enable the stimulus below. */
 module tb ();
 
   // Dump the signals to a FST file. You can view it with gtkwave or surfer.
   initial begin
-    $dumpfile("tb.fst");
+    $dumpfile(`TB_DUMPFILE);
     $dumpvars(0, tb);
     #1;
   end
@@ -34,5 +36,33 @@ module tb ();
       .clk    (clk),      // clock
       .rst_n  (rst_n)     // not reset
   );
+
+`ifdef SV_TEST
+  // Replace or extend this example with checks for your design.
+  // The 10 us period matches the cocotb example in test.py.
+  initial clk = 0;
+  always #5000 clk = ~clk;
+
+  initial begin
+    ena = 1;
+    ui_in = 0;
+    uio_in = 0;
+    rst_n = 0;
+
+    repeat (10) @(posedge clk);
+    @(negedge clk);
+    rst_n = 1;
+
+    ui_in = 20;
+    uio_in = 30;
+    @(posedge clk);
+    #1;
+    if (uo_out !== 8'd50)
+      $fatal(1, "uo_out: expected 50, got %0d", uo_out);
+
+    $display("SystemVerilog test passed");
+    $finish;
+  end
+`endif
 
 endmodule
