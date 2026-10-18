@@ -23,16 +23,14 @@ jobs:
         shell: bash
         run: pip install -r test/requirements.txt
 
-      - name: Run tests
-        run: |
-          cd test
-          make clean
-          make
-          # make can return success even if cocotb reports a failure.
-          ! grep failure ../sim_outputs/rtl/cocotb/results.xml
+      - name: Run SystemVerilog tests
+        run: make -C test
 
-      - name: Run SystemVerilog test
-        run: make -C test FLOW=sv
+      - name: Run cocotb tests
+        run: |
+          make -C test FLOW=cocotb
+          # Check the result file even if cocotb's make rule returns success.
+          ! grep failure sim_outputs/rtl/cocotb/results.xml
 
       - name: Test Summary
         uses: test-summary/action@v2.4
