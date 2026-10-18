@@ -31,13 +31,13 @@ cd /workspace/test
 make
 ```
 
-Pass `FLOW=sv` to run the stimulus and checks in `test/tb.v` instead of the default cocotb test:
+SystemVerilog is the default. To run the cocotb tests instead:
 
 ```sh
-make FLOW=sv
+make FLOW=cocotb
 ```
 
-The default command also runs module tests discovered in `test/modules/`. Run one directly with `make sim_tb_fifo` from `test/`; see [test/README.md](test/README.md).
+The default command also runs SystemVerilog module tests discovered in `test/modules/`. Run one directly with `make sim_tb_fifo` from `test/`; see [test/README.md](test/README.md).
 
 Use `exit` to leave the container. See [test/README.md](test/README.md) for more simulation options.
 
