@@ -4,7 +4,7 @@
 `define TB_DUMPFILE "tb.fst"
 `endif
 
-/* The DUT wiring is shared by cocotb and the optional SystemVerilog test.
+/* The DUT wiring is shared by the default SystemVerilog test and cocotb.
    With FLOW=sv, the Makefile defines SV_TEST to enable the stimulus below. */
 module tb ();
 

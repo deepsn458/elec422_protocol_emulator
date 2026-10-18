@@ -1,7 +1,7 @@
 # Makefile
 
 # defaults
-FLOW ?= cocotb
+FLOW ?= sv
 SIM ?= icarus
 # Use the more efficient FST waveform format with Icarus.
 FST ?= -fst
@@ -89,7 +89,7 @@ ifeq ($(FLOW),sv)
 
 # Compile the stimulus in tb.v only for the SystemVerilog flow.
 SV_BUILD = $(SIM_BUILD)
-SV_EXE = $(SV_BUILD)/sim.vvp
+SV_EXE = $(SV_BUILD)/sim.$(WAVEFORM_EXT).vvp
 
 all: $(MODULE_SIM_TARGETS) $(SV_EXE)
 	vvp $(SV_EXE) $(FST)
@@ -101,7 +101,7 @@ $(SV_EXE): $(VERILOG_SOURCES)
 else ifeq ($(FLOW),cocotb)
 
 ifeq ($(MODULE_NAME),)
-all: $(MODULE_SIM_TARGETS) $(MODULE_COCOTB_TARGETS) sim
+all: $(MODULE_COCOTB_TARGETS) sim
 else
 all: sim
 endif
