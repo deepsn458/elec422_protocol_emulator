@@ -31,6 +31,36 @@ make cocotb_tb_fifo
 
 Each module cocotb run uses its matching `tb_<name>.sv`, `src/modules/<name>.sv`, and `test_<name>.py`. Its build, waveform, and results are under `../sim_outputs/modules/cocotb/<name>/`. `make FLOW=cocotb` runs all discovered module cocotb tests alongside the top level cocotb test.
 
+## IHP 1P 64x16 SRAM
+
+Instantiate `RM_IHPSG13_1P_64x16_c2` using the port names in
+[`src/modules/RM_IHPSG13_1P_64x16_c2.sv`](../src/modules/RM_IHPSG13_1P_64x16_c2.sv).
+Tie `A_DLY` to `1'b1`. `A_MEN` enables the macro; `A_WEN` and `A_REN` select
+write and read on a rising `A_CLK` edge. With both set, the output receives
+the new write data. `A_DOUT` holds its last value when no read occurs. Memory
+and output contents are undefined until written/read.
+
+Read timing: set `A_REN`, `A_MEN`, and `A_ADDR` before a rising `A_CLK` edge.
+`A_DOUT` updates just after that edge and holds until another enabled read.
+The model has a registered output, but does not add a second clock of delay
+after the edge that accepts the read. A controller that registers `A_DOUT` on
+clock edges will capture this value on the following edge.
+
+The source file is a black box for synthesis. RTL and gate-level simulations
+instead compile the supplied IHP wrapper and behavioral core in `test/ihp_sram`
+with `FUNCTIONAL` defined. Keep the two views out of the same compilation unless
+`FUNCTIONAL` is defined; otherwise their module names collide. The model files
+are explicit Makefile inputs, so editing either causes a rebuild.
+
+Run the SRAM testbench with:
+
+```sh
+make sim_tb_ihp_sram
+```
+
+`make` also runs it with the other module tests. To write another standalone
+testbench, compile it with both files in `test/ihp_sram` and `-DFUNCTIONAL`.
+
 ## Top-level simulations
 
 Run `make` to execute all discovered module SystemVerilog tests and the top level SystemVerilog test in `tb.v`:

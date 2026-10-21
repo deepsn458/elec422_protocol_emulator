@@ -10,7 +10,8 @@ SRC_DIR = $(CURDIR)/../src
 SIM_OUTPUTS = $(abspath $(CURDIR)/../sim_outputs)
 WAVEFORM_EXT = $(if $(strip $(FST)),fst,vcd)
 export PYTHONDONTWRITEBYTECODE := 1
-PROJECT_SOURCES = project.v
+PROJECT_SOURCES = project.v modules/RM_IHPSG13_1P_64x16_c2.sv
+SRAM_MODEL_SOURCES = $(CURDIR)/ihp_sram/RM_IHPSG13_1P_core_behavioral.v $(CURDIR)/ihp_sram/RM_IHPSG13_1P_64x16_c2.v
 MODULE_DIR = $(CURDIR)/modules
 MODULE_NAMES = $(patsubst tb_%.sv,%,$(notdir $(wildcard $(MODULE_DIR)/tb_*.sv)))
 MODULE_SIM_TARGETS = $(addprefix sim_tb_,$(MODULE_NAMES))
@@ -28,6 +29,11 @@ $(MODULE_SIM_TARGETS): sim_tb_%: $(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp
 $(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_%.sv $(SRC_DIR)/modules/%.sv
 	mkdir -p $(@D)
 	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/$*.$(WAVEFORM_EXT)\" -s tb_$* -o $@ $^
+
+# Use the vendor functional view for SRAM tests; the RTL file is a synthesis stub.
+$(SIM_OUTPUTS)/modules/sv/ihp_sram.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_ihp_sram.sv $(SRAM_MODEL_SOURCES)
+	mkdir -p $(@D)
+	iverilog -g2012 -DSV_TEST -DFUNCTIONAL -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/ihp_sram.$(WAVEFORM_EXT)\" -s tb_ihp_sram -o $@ $^
 
 $(MODULE_COCOTB_TARGETS): cocotb_tb_%:
 	$(MAKE) --no-print-directory FLOW=cocotb MODULE_NAME=$* sim
@@ -52,6 +58,8 @@ ifneq ($(GATES),yes)
 # RTL simulation:
 SIM_BUILD				= $(SIM_OUTPUTS)/rtl/cocotb
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
+VERILOG_SOURCES += $(SRAM_MODEL_SOURCES)
+COMPILE_ARGS += -DFUNCTIONAL
 
 else
 
@@ -65,6 +73,7 @@ VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13g2/libs.ref/sg13g2_stdcell/verilog/sg13g2
 
 # this gets copied in by the GDS action workflow
 VERILOG_SOURCES += $(CURDIR)/gate_level_netlist.v
+VERILOG_SOURCES += $(SRAM_MODEL_SOURCES)
 
 endif
 
