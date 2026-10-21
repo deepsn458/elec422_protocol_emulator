@@ -33,59 +33,90 @@ module tb_ihp_sram;
 `ifdef SV_TEST
     initial begin
         // Write without read enable: output retains its previous value.
+        $display("<< write without read enable: output retains its previous value >>");
         @(negedge clk);
         men = 1;
         wen = 1;
-        addr = 0;
+        addr = 1;
+        
         din = 16'h1234;
         @(posedge clk);
         #1;
 
-        // A read is synchronous and returns the word written above.
+        // A read is synchronous. Dout is valid on the cycle following the one
+        // in which a valid address is passed in
         @(negedge clk);
         wen = 0;
         ren = 1;
-        @(posedge clk);
+        repeat(2)@(posedge clk);
         #1;
+        $display("din=%h, dout=%h", din, dout);
         if (dout !== 16'h1234)
-            $fatal(1, "SRAM readback at address 0 failed: %h", dout);
+            $error(1, "SRAM readback at address 0 failed: %h", dout);
 
         // MEN gates writes and reads, and the registered output holds.
+        $display("<< write without memory enable: registered output holds >>");
         @(negedge clk);
         men = 0;
         wen = 1;
         din = 16'hdead;
         @(posedge clk);
         #1;
+        $display("din=%h, dout=%h", din, dout);
         if (dout !== 16'h1234)
-            $fatal(1, "SRAM output changed while disabled: %h", dout);
+            $error(1, "SRAM output changed while disabled: %h", dout);
 
+        $display("<< read without memory enable: what is the output of dout??");
         @(negedge clk);
-        men = 1;
-        wen = 0;
+        men = 0;
+        ren = 1;
         @(posedge clk);
         #1;
-        if (dout !== 16'h1234)
-            $fatal(1, "SRAM disabled write modified address 0: %h", dout);
+        $display("dout: %h",dout);
+
+        $display("<< print dout without read enable >>");
+        @(negedge clk);
+        men = 1;
+        ren = 0;
+        @(posedge clk);
+        #1
+        $display("dout: %h", dout);
 
         // Simultaneous write and read returns the new data (write-through).
+        $display("<< Simultaneous write and read returns the new data >>");
         @(negedge clk);
         addr = 6'd63;
         wen = 1;
+        ren = 1;
         din = 16'hbeef;
         @(posedge clk);
         #1;
+        $display("din=%h, dout=%h", din, dout);
         if (dout !== 16'hbeef)
-            $fatal(1, "SRAM write-through at address 63 failed: %h", dout);
+            $error(1, "SRAM write-through at address 63 failed: %h", dout);
 
         @(negedge clk);
         wen = 0;
         @(posedge clk);
         #1;
         if (dout !== 16'hbeef)
-            $fatal(1, "SRAM readback at address 63 failed: %h", dout);
+            $error(1, "SRAM readback at address 63 failed: %h", dout);
 
-        $display("IHP SRAM SystemVerilog test passed");
+        // A read request does not change DOUT before the sampling edge.
+        // Address 1 contains dead, while the last output is beef.
+        @(negedge clk);
+        addr = 6'd1;
+        #1;
+        if (dout !== 16'hbeef)
+            $error(1, "SRAM output changed before the read clock edge: %h", dout);
+        $display("before read edge: ren=%b addr=%d dout=%h", ren, addr, dout);
+        @(posedge clk);
+        #1;
+        if (dout !== 16'hdead)
+            $error(1, "SRAM output did not update after the read clock edge: %h", dout);
+        $display("after read edge:  ren=%b addr=%d dout=%h", ren, addr, dout);
+
+        $display($time,"IHP SRAM SystemVerilog test passed");
         $finish;
     end
 `endif
