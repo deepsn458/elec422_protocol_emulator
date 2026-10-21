@@ -29,7 +29,9 @@ For a cocotb module test, add `test/modules/test_fifo.py` and run:
 make cocotb_tb_fifo
 ```
 
-Each module cocotb run uses its matching `tb_<name>.sv`, `src/modules/<name>.sv`, and `test_<name>.py`. Its build, waveform, and results are under `../sim_outputs/modules/cocotb/<name>/`. `make FLOW=cocotb` runs all discovered module cocotb tests alongside the top level cocotb test.
+Each module cocotb run uses its matching `tb_<name>.sv` and `test_<name>.py`. Its build, waveform, and results are under `../sim_outputs/modules/cocotb/<name>/`. `make FLOW=cocotb` runs all discovered module cocotb tests alongside the top level cocotb test.
+
+Both module flows compile every `src/modules/*.sv` file, so a module can instantiate others (for example, `sm` uses `isr`, `osr`, `regfile` and `clockdiv`); `src/modules/<name>.sv` must still exist.
 
 ## Top-level simulations
 

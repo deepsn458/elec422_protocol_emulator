@@ -12,6 +12,9 @@ WAVEFORM_EXT = $(if $(strip $(FST)),fst,vcd)
 export PYTHONDONTWRITEBYTECODE := 1
 PROJECT_SOURCES = project.v
 MODULE_DIR = $(CURDIR)/modules
+# Every module test compiles all module sources, so a module can instantiate
+# others (sm uses isr, osr, regfile and clockdiv).
+MODULE_SOURCES = $(wildcard $(SRC_DIR)/modules/*.sv)
 MODULE_NAMES = $(patsubst tb_%.sv,%,$(notdir $(wildcard $(MODULE_DIR)/tb_*.sv)))
 MODULE_SIM_TARGETS = $(addprefix sim_tb_,$(MODULE_NAMES))
 MODULE_COCOTB_NAMES = $(filter $(MODULE_NAMES),$(patsubst test_%.py,%,$(notdir $(wildcard $(MODULE_DIR)/test_*.py))))
@@ -25,9 +28,9 @@ MODULE_COCOTB_TARGETS = $(addprefix cocotb_tb_,$(MODULE_COCOTB_NAMES))
 $(MODULE_SIM_TARGETS): sim_tb_%: $(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp
 	vvp $< $(FST)
 
-$(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_%.sv $(SRC_DIR)/modules/%.sv
+$(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_%.sv $(SRC_DIR)/modules/%.sv $(MODULE_SOURCES)
 	mkdir -p $(@D)
-	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/$*.$(WAVEFORM_EXT)\" -s tb_$* -o $@ $^
+	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/$*.$(WAVEFORM_EXT)\" -s tb_$* -o $@ $< $(MODULE_SOURCES)
 
 $(MODULE_COCOTB_TARGETS): cocotb_tb_%:
 	$(MAKE) --no-print-directory FLOW=cocotb MODULE_NAME=$* sim
@@ -38,7 +41,7 @@ ifneq ($(MODULE_NAME),)
 
 # A module cocotb run gets its own top level, Python test, and build directory.
 SIM_BUILD = $(SIM_OUTPUTS)/modules/cocotb/$(MODULE_NAME)
-VERILOG_SOURCES = $(SRC_DIR)/modules/$(MODULE_NAME).sv $(MODULE_DIR)/tb_$(MODULE_NAME).sv
+VERILOG_SOURCES = $(MODULE_SOURCES) $(MODULE_DIR)/tb_$(MODULE_NAME).sv
 TOPLEVEL = tb_$(MODULE_NAME)
 COCOTB_TEST_MODULES = test_$(MODULE_NAME)
 COCOTB_RESULTS_FILE = $(SIM_BUILD)/results.xml
