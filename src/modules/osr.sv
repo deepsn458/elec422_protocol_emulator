@@ -36,28 +36,18 @@ module osr #(
 
   localparam logic [DW_BITS:0] FULL = DATA_WIDTH;
 
-  logic [DW_BITS:0] n_eff;                  // 1..DATA_WIDTH
-  logic [2*DATA_WIDTH-1:0] cat_r;          // {q, 0} >> n
-  logic [2*DATA_WIDTH-1:0] cat_l;          // {0, q} << n
-  logic [DW_BITS:0] back;                   // DATA_WIDTH - n
-  logic [DATA_WIDTH-1:0] rest;             // q after the shift
-  logic [DW_BITS+1:0] cnt_sum;             // cnt + n_eff before saturation
+  logic [DW_BITS:0] n_eff;                // 1..DATA_WIDTH
+  logic [DATA_WIDTH-1:0] mask;           // low n_eff bits set
+  logic [DATA_WIDTH-1:0] rest;           // q after the shift
+  logic [DW_BITS+1:0] cnt_sum;           // cnt + n_eff before saturation
 
   assign n_eff = (n == '0) ? FULL : {1'b0, n};
+  assign mask = (DATA_WIDTH'(1) << n_eff) - DATA_WIDTH'(1);
 
-  // Right: {q, 0} >> n. High word = remaining bits, low word = bits that
-  //        fell out, left-aligned at [DATA_WIDTH-1:DATA_WIDTH-n];
-  //        shift them back by DATA_WIDTH-n.
-  // Left : {0, q} << n. High word = bits shifted out (already
-  //        right-aligned), low word = remaining bits.
-  assign cat_r = {q, {DATA_WIDTH{1'b0}}} >> n_eff;
-  assign cat_l = {{DATA_WIDTH{1'b0}}, q} << n_eff;
-  assign back  = FULL - n_eff;
-
-  assign shifted = dir ? (cat_r[DATA_WIDTH-1:0] >> back)
-                       : cat_l[2*DATA_WIDTH-1:DATA_WIDTH];
-  assign rest    = dir ? cat_r[2*DATA_WIDTH-1:DATA_WIDTH]
-                       : cat_l[DATA_WIDTH-1:0];
+  // Right: take the low bits, then move the remaining bits down.
+  // Left: take the high bits and right-align them, then move the rest up.
+  assign shifted = dir ? (q & mask) : (q >> (FULL - n_eff));
+  assign rest    = dir ? (q >> n_eff) : (q << n_eff);
 
   assign cnt_sum   = {1'b0, cnt} + {1'b0, n_eff};
   assign shift_cnt = (cnt_sum > {1'b0, FULL}) ? FULL : cnt_sum[DW_BITS:0];
