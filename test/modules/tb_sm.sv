@@ -22,8 +22,7 @@ module tb_sm;
     wire exec_stalled;
     wire [4:0] pc;
     wire [15:0] instr;
-    wire branch_en;
-    wire [4:0] branch_addr;
+    wire read_en;
     wire [31:0] tx_data;
     wire tx_empty;
     wire [2:0] tx_level;
@@ -54,10 +53,9 @@ module tb_sm;
         .force_valid(force_valid),
         .force_instr(force_instr),
         .exec_stalled(exec_stalled),
-        .pc(pc),
+        .mem_addr(pc),
+        .read_en(read_en),
         .instr(instr),
-        .branch_en(branch_en),
-        .branch_addr(branch_addr),
         .tx_data(tx_data),
         .tx_empty(tx_empty),
         .tx_level(tx_level),
@@ -79,19 +77,6 @@ module tb_sm;
     // ------------------------------------------------------------------------
     // Models of the blocks around the state machine
     // ------------------------------------------------------------------------
-
-    // Program counter with the assumed interface: load branch_addr when
-    // branch_en is high, otherwise increment. mem_addr = pc, read_en = 1.
-    reg [4:0] pc_q;
-    always @(posedge clk) begin
-        if (rst)
-            pc_q <= 5'd0;
-        else if (branch_en)
-            pc_q <= branch_addr;
-        else
-            pc_q <= pc_q + 5'd1;
-    end
-    assign pc = pc_q;
 
     // Instruction memory, combinational read.
     reg [15:0] imem [0:31];
@@ -442,17 +427,17 @@ module tb_sm;
         pinctrl = pinctrl_f(0, 1, 0, 0, 0, 3, 0);      // SET -> GPIO 3
         // Disabled: the PC is held by branching to itself.
         #1;
-        check(branch_en, 1, "disabled: branch_en");
-        check(branch_addr, 0, "disabled: branch_addr");
+        check(dut.branch_en, 1, "disabled: branch_en");
+        check(dut.branch_addr, 0, "disabled: branch_addr");
         start();
         #1;
-        check(branch_en, 0, "pc 0: increments");
+        check(dut.branch_en, 0, "pc 0: increments");
         step(1);
         check(gpio_oe[3], 1, "set pindirs");
         check(pc, 1, "pc after set pindirs");
         for (int i = 0; i < 10; i++) begin
-            check(branch_en, (pc == 2), "wrap: branch_en");
-            check(branch_addr, (pc == 2) ? 1 : 2, "wrap: branch_addr");
+            check(dut.branch_en, (pc == 2), "wrap: branch_en");
+            check(dut.branch_addr, (pc == 2) ? 1 : 2, "wrap: branch_addr");
             step(1);
             check(gpio_out[3], (i % 2 == 0), "squarewave level");
             check(pc, (i % 2 == 0) ? 2 : 1, "squarewave pc");
@@ -585,7 +570,7 @@ module tb_sm;
             @(negedge clk);
             #1;     // after the regfile write, before the PC update
             check(dut.x, i - 1, "loop: x after falling edge");
-            check(branch_addr, (i != 0) ? 1 : 2, "loop: branch_addr");
+            check(dut.branch_addr, (i != 0) ? 1 : 2, "loop: branch_addr");
             @(posedge clk);
             #1;
             check(pc, (i != 0) ? 1 : 2, "loop: pc");

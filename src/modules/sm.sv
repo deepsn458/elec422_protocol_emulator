@@ -1,15 +1,18 @@
 // sm - one PIO state machine (RP2040 datasheet, chapter 3)
 //
 // Glue logic around the state machine's datapath blocks:
+//   * decode   - instruction fields, delay/side-set split, IRQ index
 //   * isr      - input shift register  (IN, PUSH, autopush, MOV ISR, OUT ISR)
 //   * osr      - output shift register (OUT, PULL, autopull, MOV OSR)
 //   * regfile  - scratch registers X (reg 1) and Y (reg 2); reg 0 reads 0
 //   * clockdiv - 16.8 fractional clock divider -> clock enable 'tick'
+//   * program_counter - the PC register
 //
-// The program counter and the instruction memory live outside this module:
-//   * pc / instr: the PC register and the instruction stored at that address.
-//   * branch_en / branch_addr: tell the PC what to load next. When branch_en
-//     is low the PC increments (31 wraps to 0). branch_addr always holds the
+// The instruction memory lives outside this module:
+//   * mem_addr / read_en / instr: the PC drives the address, memory returns
+//     the instruction stored there (combinational read).
+//   * branch_en / branch_addr (internal): tell the PC what to load next. When
+//     branch_en is low the PC increments (31 wraps to 0). branch_addr always holds the
 //     next PC, so stalls, delay cycles and disabled cycles hold the PC by
 //     "branching" to the current address, and wrap is a branch to
 //     WRAP_BOTTOM.
@@ -52,11 +55,10 @@ module sm #(
   input  logic [15:0] force_instr,
   output logic        exec_stalled,        // EXECCTRL.EXEC_STALLED
 
-  // Program counter and instruction memory
-  input  logic [4:0]  pc,                  // address of instr
-  input  logic [15:0] instr,               // instruction memory[pc]
-  output logic        branch_en,           // 1 = PC loads branch_addr
-  output logic [4:0]  branch_addr,         // next PC
+  // Instruction memory
+  output logic [4:0]  mem_addr,            // = PC
+  output logic        read_en,
+  input  logic [15:0] instr,               // instruction memory[mem_addr]
 
   // TX FIFO (host -> SM), first-word fall-through
   input  logic [31:0] tx_data,             // oldest word, valid when !tx_empty
@@ -84,16 +86,6 @@ module sm #(
 );
 
   localparam logic [5:0] FULL = 6'd32;
-
-  // Opcodes
-  localparam logic [2:0] OP_JMP  = 3'd0;
-  localparam logic [2:0] OP_WAIT = 3'd1;
-  localparam logic [2:0] OP_IN   = 3'd2;
-  localparam logic [2:0] OP_OUT  = 3'd3;
-  localparam logic [2:0] OP_PP   = 3'd4;   // PUSH (bit 7 = 0) / PULL (bit 7 = 1)
-  localparam logic [2:0] OP_MOV  = 3'd5;
-  localparam logic [2:0] OP_IRQ  = 3'd6;
-  localparam logic [2:0] OP_SET  = 3'd7;
 
   // OUT destinations
   localparam logic [2:0] OUT_PINS    = 3'd0;
@@ -192,15 +184,37 @@ module sm #(
   assign div_int       = clkdiv[31:16];
   assign div_frac      = clkdiv[15:8];
 
-  // Instruction fields (decoded below; arg2 is also the IN/OUT bit count)
-  logic [2:0] op, arg1;
-  logic [4:0] dss, arg2;
+  // Instruction fields from u_decode (arg2 is also the IN/OUT bit count)
+  logic [2:0] arg1;
+  logic [4:0] arg2;
 
   // ---------------------------------------------------------------------------
   // Submodules
   // ---------------------------------------------------------------------------
 
   logic        tick;
+
+  // Program counter. pc_en is always high: the SM holds the PC on stalled,
+  // delayed and disabled cycles by branching to the current address.
+  logic [4:0]  pc;
+  logic        branch_en;          // 1 = PC loads branch_addr
+  logic [4:0]  branch_addr;        // next PC
+
+  program_counter #(
+    .MEM_ADDR_WIDTH (5),
+    .BYTE_INCREMENT (1),
+    .SRAM_BYTE_WIDTH(1)
+  ) u_pc (
+    .clk        (clk),
+    .rst_n      (!rst),
+    .pc_en      (1'b1),
+    .branch_en  (branch_en),
+    .branch_addr(branch_addr),
+    .pc         (pc),
+    .read_en    (read_en)
+  );
+
+  assign mem_addr = pc;
 
   clockdiv u_clockdiv (
     .clk      (clk),
@@ -317,55 +331,52 @@ module sm #(
   logic [1:0] wait_src;          // WAIT source
   logic       wait_pol;          // WAIT polarity
   logic [5:0] bit_count;         // IN/OUT bit count, 1..32
-
-  assign op   = ins[15:13];
-  assign dss  = ins[12:8];
-  assign arg1 = ins[7:5];
-  assign arg2 = ins[4:0];
-
-  assign is_jmp  = (op == OP_JMP);
-  assign is_wait = (op == OP_WAIT);
-  assign is_in   = (op == OP_IN);
-  assign is_out  = (op == OP_OUT);
-  assign is_push = (op == OP_PP) && !ins[7];
-  assign is_pull = (op == OP_PP) &&  ins[7];
-  assign is_mov  = (op == OP_MOV);
-  assign is_irq  = (op == OP_IRQ);
-  assign is_set  = (op == OP_SET);
-
-  assign if_flag      = ins[6];
-  assign blk          = ins[5];
-  assign irq_clr_bit  = ins[6];
-  assign irq_wait_bit = ins[5];
-  assign mov_op       = ins[4:3];
-  assign mov_srcsel   = ins[2:0];
-  assign wait_src     = ins[6:5];
-  assign wait_pol     = ins[7];
-  assign bit_count    = count32(arg2);
-
-  // Delay/side-set split: the top sideset_count bits are side-set, the rest
-  // delay. With SIDE_EN the top side-set bit is an enable.
-  logic [4:0]  delay;
-  logic [4:0]  ss_field;         // side-set bits, right-aligned
-  logic        ss_valid;
-  logic [2:0]  ss_bits;          // side-set data bits, 0..5
-  logic [31:0] ss_mask, ss_data;
-
-  assign delay    = dss & (5'h1F >> sideset_count);
-  assign ss_field = dss >> (3'd5 - sideset_count);
-  assign ss_valid = (sideset_count != 3'd0) &&
-                    (!side_en || ss_field[sideset_count - 3'd1]);
-  assign ss_bits  = (side_en && sideset_count != 3'd0) ? sideset_count - 3'd1
-                                                       : sideset_count;
-  assign ss_mask  = rotl(lowmask({3'd0, ss_bits}), sideset_base);
-  assign ss_data  = rotl({27'd0, ss_field} & lowmask({3'd0, ss_bits}), sideset_base) & ss_mask;
-
-  // IRQ index: bit 4 = rel, which adds SM_ID to bits 1:0 (modulo 4).
+  logic [4:0] delay;
+  logic       ss_valid;          // instruction performs a side-set
+  logic [2:0] ss_bits;           // side-set data bits, 0..5
+  logic [4:0] ss_value;          // side-set data, right-aligned
   logic [2:0] irq_idx;
   logic [7:0] irq_bit;
 
-  assign irq_idx = arg2[4] ? {arg2[2], arg2[1:0] + SM_ID} : arg2[2:0];
-  assign irq_bit = 8'd1 << irq_idx;
+  decode #(
+    .SM_ID (SM_ID)
+  ) u_decode (
+    .ins           (ins),
+    .sideset_count (sideset_count),
+    .side_en       (side_en),
+    .arg1          (arg1),
+    .arg2          (arg2),
+    .bit_count     (bit_count),
+    .is_jmp        (is_jmp),
+    .is_wait       (is_wait),
+    .is_in         (is_in),
+    .is_out        (is_out),
+    .is_push       (is_push),
+    .is_pull       (is_pull),
+    .is_mov        (is_mov),
+    .is_irq        (is_irq),
+    .is_set        (is_set),
+    .blk           (blk),
+    .if_flag       (if_flag),
+    .irq_clr_bit   (irq_clr_bit),
+    .irq_wait_bit  (irq_wait_bit),
+    .mov_op        (mov_op),
+    .mov_srcsel    (mov_srcsel),
+    .wait_src      (wait_src),
+    .wait_pol      (wait_pol),
+    .delay         (delay),
+    .ss_valid      (ss_valid),
+    .ss_bits       (ss_bits),
+    .ss_value      (ss_value),
+    .irq_idx       (irq_idx),
+    .irq_bit       (irq_bit)
+  );
+
+  // Side-set data and mask, mapped onto the GPIOs from SIDESET_BASE.
+  logic [31:0] ss_mask, ss_data;
+
+  assign ss_mask = rotl(lowmask({3'd0, ss_bits}), sideset_base);
+  assign ss_data = rotl({27'd0, ss_value}, sideset_base) & ss_mask;
 
   // ---------------------------------------------------------------------------
   // Operands
