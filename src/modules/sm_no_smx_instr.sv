@@ -28,13 +28,16 @@
 //
 // Differences from RP2040: OUT_STICKY, INLINE_OUT_EN and FJOIN are not
 // implemented, and SM_RESTART also clears the OSR contents (RP2040 keeps
-// them). A forced instruction that stalls is retried on every clock,
-// ignoring the clock divider and SM_ENABLE, until it completes.
+// them). There is no SMx_INSTR (forced instruction) port, and OUT EXEC /
+// MOV EXEC are not supported: every instruction comes from instruction memory.
 
 `default_nettype none
 
-module sm #(
-  parameter logic [1:0] SM_ID = 2'd0      // state machine number, for IRQ rel
+module sm_no_smx_instr #(
+  parameter logic [1:0] SM_ID = 2'd0,     // state machine number, for IRQ rel
+  // Width of X, Y, ISR, OSR, the FIFO words and the GPIO buses. Must be a
+  // power of two from 8 to 32 (5-bit instruction fields address up to 32).
+  parameter int DATA_WIDTH = 16
 ) (
   input  logic        clk,
   input  logic        rst,                 // synchronous, active high
@@ -56,23 +59,23 @@ module sm #(
   input  logic [15:0] instr,               // instruction memory[mem_addr]
 
   // TX FIFO (host -> SM), first-word fall-through
-  input  logic [31:0] tx_data,             // oldest word, valid when !tx_empty
+  input  logic [DATA_WIDTH-1:0] tx_data,   // oldest word, valid when !tx_empty
   input  logic        tx_empty,
   input  logic [2:0]  tx_level,            // words held, 0..4 (MOV STATUS)
   output logic        tx_pop,
 
   // RX FIFO (SM -> host)
-  output logic [31:0] rx_data,
+  output logic [DATA_WIDTH-1:0] rx_data,
   input  logic        rx_full,
   input  logic [2:0]  rx_level,
   output logic        rx_push,
 
-  // GPIO: 32-bit write masks and data for pin levels and directions
-  input  logic [31:0] gpio_in,
-  output logic [31:0] pins_we,
-  output logic [31:0] pins_wdata,
-  output logic [31:0] dirs_we,
-  output logic [31:0] dirs_wdata,
+  // GPIO: DATA_WIDTH-bit write masks and data for pin levels and directions
+  input  logic [DATA_WIDTH-1:0] gpio_in,
+  output logic [DATA_WIDTH-1:0] pins_we,
+  output logic [DATA_WIDTH-1:0] pins_wdata,
+  output logic [DATA_WIDTH-1:0] dirs_we,
+  output logic [DATA_WIDTH-1:0] dirs_wdata,
 
   // IRQ flags shared by all state machines
   input  logic [7:0]  irq_flags,
@@ -80,7 +83,12 @@ module sm #(
   output logic [7:0]  irq_clr
 );
 
-  localparam logic [5:0] FULL = 6'd32;
+  // Counts (bit counts, thresholds, pin counts) run 0..DATA_WIDTH and need
+  // CW bits; pin numbers and isr/osr shift amounts need DW_BITS bits.
+  localparam int DW_BITS = $clog2(DATA_WIDTH);
+  localparam int CW      = DW_BITS + 1;
+  localparam logic [CW-1:0] FULL = DATA_WIDTH;
+  localparam logic [DATA_WIDTH-1:0] ONE = 1;
 
   // OUT destinations
   localparam logic [2:0] OUT_PINS    = 3'd0;
@@ -110,31 +118,39 @@ module sm #(
   // Helpers
   // ---------------------------------------------------------------------------
 
-  // Low n bits set, n = 0..32 (1 << 32 is 0, so 0 - 1 gives all ones).
-  function automatic logic [31:0] lowmask(input logic [5:0] n);
-    return (32'h1 << n) - 32'h1;
+  // Low n bits set, n = 0..DATA_WIDTH (1 << DATA_WIDTH is 0, so 0 - 1 gives
+  // all ones).
+  function automatic logic [DATA_WIDTH-1:0] lowmask(input logic [CW-1:0] n);
+    return (ONE << n) - ONE;
   endfunction
 
-  // Rotate left by s: maps bit 0 to GPIO s, wrapping after GPIO 31.
-  function automatic logic [31:0] rotl(input logic [31:0] v, input logic [4:0] s);
-    return (v << s) | (v >> (6'd32 - {1'b0, s}));
+  // Rotate left by s: maps bit 0 to GPIO s, wrapping after the last GPIO.
+  function automatic logic [DATA_WIDTH-1:0] rotl(input logic [DATA_WIDTH-1:0] v,
+                                                 input logic [DW_BITS-1:0] s);
+    return (v << s) | (v >> (FULL - CW'(s)));
   endfunction
 
   // Rotate right by s: GPIO s becomes bit 0.
-  function automatic logic [31:0] rotr(input logic [31:0] v, input logic [4:0] s);
-    return (v >> s) | (v << (6'd32 - {1'b0, s}));
+  function automatic logic [DATA_WIDTH-1:0] rotr(input logic [DATA_WIDTH-1:0] v,
+                                                 input logic [DW_BITS-1:0] s);
+    return (v >> s) | (v << (FULL - CW'(s)));
   endfunction
 
-  function automatic logic [31:0] bitrev(input logic [31:0] v);
-    logic [31:0] r;
-    for (int i = 0; i < 32; i++)
-      r[i] = v[31 - i];
+  function automatic logic [DATA_WIDTH-1:0] bitrev(input logic [DATA_WIDTH-1:0] v);
+    logic [DATA_WIDTH-1:0] r;
+    for (int i = 0; i < DATA_WIDTH; i++)
+      r[i] = v[DATA_WIDTH - 1 - i];
     return r;
   endfunction
 
-  // 5-bit count/threshold field: 0 encodes 32.
-  function automatic logic [5:0] count32(input logic [4:0] n);
-    return (n == 5'd0) ? FULL : {1'b0, n};
+  // Count clamped to DATA_WIDTH.
+  function automatic logic [CW-1:0] clampw(input logic [5:0] n);
+    return (n > FULL) ? FULL : n[CW-1:0];
+  endfunction
+
+  // 5-bit count/threshold field where 0 encodes 32, clamped to DATA_WIDTH.
+  function automatic logic [CW-1:0] count32(input logic [4:0] n);
+    return (n == 5'd0) ? FULL : clampw({1'b0, n});
   endfunction
 
   // ---------------------------------------------------------------------------
@@ -142,20 +158,21 @@ module sm #(
   // ---------------------------------------------------------------------------
 
   logic        side_en, side_pindir;
-  logic [4:0]  jmp_pin, wrap_top, wrap_bottom;
+  logic [DW_BITS-1:0] jmp_pin;
+  logic [4:0]  wrap_top, wrap_bottom;
   logic        status_sel;
   logic [3:0]  status_n;
-  logic [5:0]  pull_thresh, push_thresh;
+  logic [CW-1:0] pull_thresh, push_thresh;
   logic        out_dir, in_dir, autopull, autopush;
   logic [2:0]  sideset_count, set_count;
-  logic [5:0]  out_count;
-  logic [4:0]  in_base, sideset_base, set_base, out_base;
+  logic [CW-1:0] out_count;
+  logic [DW_BITS-1:0] in_base, sideset_base, set_base, out_base;
   logic [15:0] div_int;
   logic [7:0]  div_frac;
 
   assign side_en       = execctrl[30]; // if 1, the MSB of the delay/side-set field is used to enable/disable side set
   assign side_pindir   = execctrl[29]; // if 1, side-set data is asserted to pin dirs instead of pin values
-  assign jmp_pin       = execctrl[28:24]; // the gpio number to use as the jmp pin
+  assign jmp_pin       = execctrl[24 +: DW_BITS]; // the gpio number to use as the jmp pin (mod DATA_WIDTH)
   assign wrap_top      = execctrl[16:12]; // after reaching this address, execution is wrapped to wrap_bottom 
   assign wrap_bottom   = execctrl[11:7]; // after reaching wrap_top, execution is wrapped to this instruction
   assign status_sel    = execctrl[4]; // if 1, use tx fifo level for comparison for MOV X, STATUS instr. Else use rx level
@@ -170,18 +187,28 @@ module sm #(
 
   assign sideset_count = (pinctrl[31:29] > 3'd5) ? 3'd5 : pinctrl[31:29]; //num bits to be used as sideset (max 5)
   assign set_count     = (pinctrl[28:26] > 3'd5) ? 3'd5 : pinctrl[28:26]; //how many pins are asserted by set (max 5)
-  assign out_count     = (pinctrl[25:20] > FULL) ? FULL : pinctrl[25:20]; //num pins assered by OUT or MOV instructions
-  assign in_base       = pinctrl[19:15]; // base pin for input
-  assign sideset_base  = pinctrl[14:10];
-  assign set_base      = pinctrl[9:5];
-  assign out_base      = pinctrl[4:0];
+  assign out_count     = clampw(pinctrl[25:20]); //num pins assered by OUT or MOV instructions (max DATA_WIDTH)
+  // Pin numbers are 5-bit fields; only the low DW_BITS bits are used (mod DATA_WIDTH).
+  assign in_base       = pinctrl[15 +: DW_BITS]; // base pin for input
+  assign sideset_base  = pinctrl[10 +: DW_BITS];
+  assign set_base      = pinctrl[5  +: DW_BITS];
+  assign out_base      = pinctrl[0  +: DW_BITS];
 
   assign div_int       = clkdiv[31:16];
   assign div_frac      = clkdiv[15:8];
 
-  // Instruction fields from u_decode (arg2 is also the IN/OUT bit count)
+  // Instruction fields from u_decode
   logic [2:0] arg1;
   logic [4:0] arg2;
+  logic [5:0] bit_count;         // IN/OUT bit count, 1..32
+
+  // IN/OUT bit count clamped to DATA_WIDTH, and the isr/osr encoding of it
+  // (DW_BITS bits, 0 = DATA_WIDTH).
+  logic [CW-1:0]      io_count;
+  logic [DW_BITS-1:0] io_n;
+
+  assign io_count = clampw(bit_count);
+  assign io_n     = io_count[DW_BITS-1:0];
 
   // ---------------------------------------------------------------------------
   // Submodules
@@ -223,11 +250,11 @@ module sm #(
   // The regfile writes on the falling clock edge.
   logic        xy_we;
   logic [1:0]  xy_addr;
-  logic [31:0] xy_wdata;
-  logic [31:0] x, y;
+  logic [DATA_WIDTH-1:0] xy_wdata;
+  logic [DATA_WIDTH-1:0] x, y;
 
   regfile #(
-    .REG_WIDTH (32),
+    .REG_WIDTH (DATA_WIDTH),
     .NUMREGS   (3)
   ) u_xy (
     .clk       (clk),
@@ -242,19 +269,21 @@ module sm #(
 
   // ISR. Its synchronous reset also serves as the PUSH / autopush clear.
   logic        isr_clear, isr_load, isr_shift;
-  logic [5:0]  isr_load_cnt;
-  logic [31:0] isr_din;
-  logic [31:0] isr_q, isr_shift_q;
-  logic [5:0]  isr_cnt, isr_shift_cnt;
+  logic [CW-1:0]         isr_load_cnt;
+  logic [DATA_WIDTH-1:0] isr_din;
+  logic [DATA_WIDTH-1:0] isr_q, isr_shift_q;
+  logic [CW-1:0]         isr_cnt, isr_shift_cnt;
 
-  isr u_isr (
+  isr #(
+    .DATA_WIDTH (DATA_WIDTH)
+  ) u_isr (
     .clk       (clk),
     .rst       (rst | restart | isr_clear),
     .ce        (1'b1),
     .load      (isr_load),
     .load_cnt  (isr_load_cnt),
     .shift     (isr_shift),
-    .n         (arg2),
+    .n         (io_n),
     .dir       (in_dir),
     .din       (isr_din),
     .q         (isr_q),
@@ -264,17 +293,19 @@ module sm #(
   );
 
   logic        osr_load, osr_shift;
-  logic [31:0] osr_din;
-  logic [31:0] osr_q, out_data;
-  logic [5:0]  osr_cnt, osr_shift_cnt;
+  logic [DATA_WIDTH-1:0] osr_din;
+  logic [DATA_WIDTH-1:0] osr_q, out_data;
+  logic [CW-1:0]         osr_cnt, osr_shift_cnt;
 
-  osr u_osr (
+  osr #(
+    .DATA_WIDTH (DATA_WIDTH)
+  ) u_osr (
     .clk       (clk),
     .rst       (rst | restart),
     .ce        (1'b1),
     .load      (osr_load),
     .shift     (osr_shift),
-    .n         (arg2),
+    .n         (io_n),
     .dir       (out_dir),
     .din       (osr_din),
     .q         (osr_q),
@@ -310,7 +341,6 @@ module sm #(
   logic [2:0] mov_srcsel;        // MOV source
   logic [1:0] wait_src;          // WAIT source
   logic       wait_pol;          // WAIT polarity
-  logic [5:0] bit_count;         // IN/OUT bit count, 1..32
   logic [4:0] delay;
   logic       ss_valid;          // instruction performs a side-set
   logic [2:0] ss_bits;           // side-set data bits, 0..5
@@ -353,21 +383,21 @@ module sm #(
   );
 
   // Side-set data and mask, mapped onto the GPIOs from SIDESET_BASE.
-  logic [31:0] ss_mask, ss_data;
+  logic [DATA_WIDTH-1:0] ss_mask, ss_data;
 
-  assign ss_mask = rotl(lowmask({3'd0, ss_bits}), sideset_base);
-  assign ss_data = rotl({27'd0, ss_value}, sideset_base) & ss_mask;
+  assign ss_mask = rotl(lowmask(CW'(ss_bits)), sideset_base);
+  assign ss_data = rotl(DATA_WIDTH'(ss_value), sideset_base) & ss_mask;
 
   // ---------------------------------------------------------------------------
   // Operands
   // ---------------------------------------------------------------------------
 
-  logic [31:0] in_pins;          // GPIOs rotated so IN_BASE is bit 0
-  logic [31:0] status;
-  logic [31:0] in_src, mov_src, mov_val;
+  logic [DATA_WIDTH-1:0] in_pins;  // GPIOs rotated so IN_BASE is bit 0
+  logic [DATA_WIDTH-1:0] status;
+  logic [DATA_WIDTH-1:0] in_src, mov_src, mov_val;
 
   assign in_pins = rotr(gpio_in, in_base);
-  assign status  = ({1'b0, (status_sel ? rx_level : tx_level)} < status_n) ? 32'hFFFF_FFFF : 32'd0;
+  assign status  = ({1'b0, (status_sel ? rx_level : tx_level)} < status_n) ? '1 : '0;
 
   always_comb begin
     case (arg1)                  // IN source
@@ -376,7 +406,7 @@ module sm #(
       3'd2:    in_src = y;
       3'd6:    in_src = isr_q;
       3'd7:    in_src = osr_q;
-      default: in_src = 32'd0;   // NULL, reserved
+      default: in_src = '0;      // NULL, reserved
     endcase
 
     case (mov_srcsel)
@@ -386,7 +416,7 @@ module sm #(
       3'd5:    mov_src = status;
       3'd6:    mov_src = isr_q;
       3'd7:    mov_src = osr_q;
-      default: mov_src = 32'd0;  // NULL, reserved
+      default: mov_src = '0;     // NULL, reserved
     endcase
 
     case (mov_op)
@@ -406,17 +436,17 @@ module sm #(
   logic x_nz_q, y_nz_q;
 
   always_ff @(negedge clk) begin
-    x_nz_q <= (x != 32'd0);
-    y_nz_q <= (y != 32'd0);
+    x_nz_q <= (x != '0);
+    y_nz_q <= (y != '0);
   end
 
   logic jmp_cond;
   always_comb begin
     case (arg1)
       3'd0:    jmp_cond = 1'b1;                     // always
-      3'd1:    jmp_cond = (x == 32'd0);             // !X
+      3'd1:    jmp_cond = (x == '0);                // !X
       3'd2:    jmp_cond = x_nz_q;                   // X--
-      3'd3:    jmp_cond = (y == 32'd0);             // !Y
+      3'd3:    jmp_cond = (y == '0);                // !Y
       3'd4:    jmp_cond = y_nz_q;                   // Y--
       3'd5:    jmp_cond = (x != y);                 // X!=Y
       3'd6:    jmp_cond = gpio_in[jmp_pin];         // PIN
@@ -427,8 +457,8 @@ module sm #(
   logic wait_bit;
   always_comb begin
     case (wait_src)
-      2'd0:    wait_bit = gpio_in[arg2];
-      2'd1:    wait_bit = in_pins[arg2];
+      2'd0:    wait_bit = gpio_in[arg2[DW_BITS-1:0]];
+      2'd1:    wait_bit = in_pins[arg2[DW_BITS-1:0]];
       2'd2:    wait_bit = irq_flags[irq_idx];
       default: wait_bit = wait_pol;                 // reserved: never waits
     endcase
@@ -466,7 +496,7 @@ module sm #(
   assign isr_shift    = done && is_in && !in_push;
   assign isr_clear    = done && ((is_in && in_push) || (is_push && !push_skip));
   assign isr_load     = done && ((is_mov && arg1 == MOV_ISR) || (is_out && arg1 == OUT_ISR));
-  assign isr_load_cnt = is_out ? bit_count : 6'd0;
+  assign isr_load_cnt = is_out ? io_count : '0;
   assign isr_din      = is_in  ? in_src :
                         is_mov ? mov_val : out_data;
 
@@ -496,17 +526,17 @@ module sm #(
   always_comb begin
     xy_we    = 1'b0;
     xy_addr  = 2'd0;
-    xy_wdata = 32'd0;
+    xy_wdata = '0;
     if (done) begin
       if (is_jmp && arg1 == 3'd2) begin                        // X--
-        xy_we = 1'b1;  xy_addr = 2'd1;  xy_wdata = x - 32'd1;
+        xy_we = 1'b1;  xy_addr = 2'd1;  xy_wdata = x - ONE;
       end else if (is_jmp && arg1 == 3'd4) begin               // Y--
-        xy_we = 1'b1;  xy_addr = 2'd2;  xy_wdata = y - 32'd1;
+        xy_we = 1'b1;  xy_addr = 2'd2;  xy_wdata = y - ONE;
       end else if ((is_out || is_mov || is_set) && (arg1 == 3'd1 || arg1 == 3'd2)) begin
         xy_we    = 1'b1;
         xy_addr  = (arg1 == 3'd1) ? 2'd1 : 2'd2;
         xy_wdata = is_out ? out_data :
-                   is_mov ? mov_val  : {27'd0, arg2};
+                   is_mov ? mov_val  : DATA_WIDTH'(arg2);
       end
     end
   end
@@ -514,22 +544,22 @@ module sm #(
   // Pins. OUT and MOV use the OUT mapping, SET the SET mapping. Side-set
   // happens on every active cycle, stalled or not, and wins on overlap.
   logic        os_pins, os_dirs;
-  logic [31:0] os_raw, os_mask, os_data;
-  logic [31:0] side_pins_m, side_dirs_m, os_pins_m, os_dirs_m;
+  logic [DATA_WIDTH-1:0] os_raw, os_mask, os_data;
+  logic [DATA_WIDTH-1:0] side_pins_m, side_dirs_m, os_pins_m, os_dirs_m;
 
   assign os_pins = done && ((is_out && arg1 == OUT_PINS) || (is_mov && arg1 == MOV_PINS) ||
                             (is_set && arg1 == SET_PINS));
   assign os_dirs = done && ((is_out && arg1 == OUT_PINDIRS) || (is_set && arg1 == SET_PINDIRS));
-  assign os_raw  = is_set ? {27'd0, arg2} :
+  assign os_raw  = is_set ? DATA_WIDTH'(arg2) :
                    is_out ? out_data : mov_val;
-  assign os_mask = rotl(lowmask(is_set ? {3'd0, set_count} : out_count),
+  assign os_mask = rotl(lowmask(is_set ? CW'(set_count) : out_count),
                         is_set ? set_base : out_base);
   assign os_data = rotl(os_raw, is_set ? set_base : out_base) & os_mask;
 
-  assign side_pins_m = (active && ss_valid && !side_pindir) ? ss_mask : 32'd0;
-  assign side_dirs_m = (active && ss_valid &&  side_pindir) ? ss_mask : 32'd0;
-  assign os_pins_m   = os_pins ? os_mask : 32'd0;
-  assign os_dirs_m   = os_dirs ? os_mask : 32'd0;
+  assign side_pins_m = (active && ss_valid && !side_pindir) ? ss_mask : '0;
+  assign side_dirs_m = (active && ss_valid &&  side_pindir) ? ss_mask : '0;
+  assign os_pins_m   = os_pins ? os_mask : '0;
+  assign os_dirs_m   = os_dirs ? os_mask : '0;
 
   assign pins_we    = os_pins_m | side_pins_m;
   assign pins_wdata = (os_data & os_pins_m & ~side_pins_m) | (ss_data & side_pins_m);
@@ -580,8 +610,7 @@ module sm #(
       delay_cnt    <= '0;
       irq_waiting  <= 1'b0;
     end else begin
-      // Delay starts after the instruction completes. Forced instructions
-      // and OUT/MOV EXEC ignore their delay field.
+      // Delay starts after the instruction completes.
       if (done)
         delay_cnt <= delay;
       else if (ce && delay_cnt != 5'd0)

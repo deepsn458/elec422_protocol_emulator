@@ -1,6 +1,6 @@
-# sm.sv: how the PIO state machine works
+# sm_no_smx_instr.sv: how the simplified PIO state machine works
 
-`sm.sv` is one PIO state machine, modelled on chapter 3 of the RP2040 datasheet. It decodes a 16-bit instruction and decides whether that instruction can finish this cycle. It then drives the blocks that do the work:
+`sm_no_smx_instr.sv` is one PIO state machine, modelled on chapter 3 of the RP2040 datasheet. It is a simplified version of `sm.sv`: **instructions only ever come from instruction memory**. There is no SMx_INSTR port for host-forced instructions, and OUT EXEC / MOV EXEC are not supported (see section 11). It decodes a 16-bit instruction and decides whether that instruction can finish this cycle. It then drives the blocks that do the work:
 
 | Instance | Module | Job |
 |---|---|---|
@@ -10,10 +10,10 @@
 | `u_isr` | `isr.sv` | Input shift register (IN, PUSH, autopush) |
 | `u_osr` | `osr.sv` | Output shift register (OUT, PULL, autopull) |
 
-Everything shared between state machines stays **outside** `sm.sv` and connects through ports. That covers the instruction memory, the TX/RX FIFOs, the GPIO output registers and the IRQ flags.
+Everything shared between state machines stays **outside** `sm_no_smx_instr.sv` and connects through ports. That covers the instruction memory, the TX/RX FIFOs, the GPIO output registers and the IRQ flags.
 
 ```
- host regs ──► ┌──────────────────── sm ────────────────────┐ ◄─► TX / RX FIFO
+ host regs ──► ┌────────────── sm_no_smx_instr ─────────────┐ ◄─► TX / RX FIFO
                │ decode  clockdiv  regfile(X,Y)  isr  osr   │
  PC ◄────────► │      decode + control (active/stall/done) │ ◄─► IRQ flags
  imem ───────► │      pin mapping + side-set               │ ──► GPIO regs
@@ -31,7 +31,6 @@ The file is organised in the order below; each heading matches a `// ---` sectio
 | Clock/reset | `clk`, `rst` | `rst` is synchronous, active high |
 | CTRL register | `en`, `restart`, `clkdiv_restart` | `restart` and `clkdiv_restart` are one-cycle pulses |
 | Config registers | `clkdiv`, `execctrl`, `shiftctrl`, `pinctrl` | 32 bits each, **RP2040 bit layout** |
-| SMx_INSTR | `force_valid`, `force_instr`, `exec_stalled` | Host-forced instruction |
 | Instruction memory | `mem_addr`, `read_en` out; `instr` in | See section 9 |
 | TX FIFO | `tx_data`, `tx_empty`, `tx_level` in; `tx_pop` out | `tx_data` must be valid *before* the pop (first-word fall-through) |
 | RX FIFO | `rx_full`, `rx_level` in; `rx_data`, `rx_push` out | |
@@ -63,20 +62,18 @@ These are plain `assign`s that slice the config registers into named fields (`wr
 
 **isr**: `n` is the instruction's bit-count field (`arg2`), and `dir` is IN_SHIFTDIR. `ce` is tied to 1 because the SM gates the `load`/`shift` strobes itself. The isr's synchronous `rst` is driven by `rst | restart | isr_clear`. That reset is also how PUSH and autopush clear the ISR (section 8).
 
-**osr**: `n` = `arg2`, `dir` = OUT_SHIFTDIR. `shifted` (the bits leaving, right-aligned) is called `out_data` in `sm`. That is what OUT writes to its destination.
+**osr**: `n` = `arg2`, `dir` = OUT_SHIFTDIR. `shifted` (the bits leaving, right-aligned) is called `out_data` in the SM. That is what OUT writes to its destination.
 
 ## 5. Instruction source and execution enable
 
-Every cycle, `sm` answers two questions.
-
+There is only one instruction source: `instr` from instruction memory, fed straight into `decode`. Every cycle, the SM answers two questions.
 
 **Does it run this cycle (`active`)?**
 
 | Signal | Meaning |
 |---|---|
 | `ce = en & tick` | The program may run: SM enabled and the divider ticked |
-| `from_imem` | The instruction came from instruction memory. **Only these move the PC on** |
-| `active`| `ce` high, no delay cycles left|
+| `active` | `ce` high, no delay cycles left |
 
 **Can it finish (`stall`)?** This comes from section 7. Then:
 
@@ -88,7 +85,7 @@ Almost every side effect (register writes, shifts, pin writes, FIFO pushes) is g
 
 ## 6. Decode (`decode.sv`)
 
-`sm` instantiates `decode` (as `u_decode`) on the selected instruction `ins`. Its inputs are only `ins`, SIDESET_COUNT, SIDE_EN and the `SM_ID` parameter. All of its outputs are combinational. The instruction word splits into four fields:
+The SM instantiates `decode` (as `u_decode`) with its `ins` input tied to `instr`. Its inputs are only `ins`, SIDESET_COUNT, SIDE_EN and the `SM_ID` parameter. All of its outputs are combinational. The instruction word splits into four fields:
 
 ```
  15  13 12      8 7    5 4      0
@@ -113,7 +110,7 @@ With `SIDE_EN` = 1, the top side-set bit is an **enable**, so one fewer bit is d
 - `ss_bits`: how many data bits there are;
 - `ss_value`: the data bits, right-aligned.
 
-Mapping onto GPIOs stays in `sm`, next to the rest of the pin logic:
+Mapping onto GPIOs stays in the SM, next to the rest of the pin logic:
 
 ```systemverilog
 assign ss_mask = rotl(lowmask({3'd0, ss_bits}), sideset_base);
@@ -272,27 +269,31 @@ gpio_out <= (gpio_out & ~pins_we) | (pins_wdata & pins_we);
 
 ## 9. Program counter control
 
-The PC is `program_counter.sv`, instantiated inside `sm` as `u_pc` (5-bit address, increment 1). Its `pc` drives `mem_addr`, and its `read_en` goes straight out. `sm` tells it what to do next through the internal `branch_en`/`branch_addr`:
+The PC is `program_counter.sv`, instantiated inside the SM as `u_pc` (5-bit address, increment 1). Its `pc` drives `mem_addr`, and its `read_en` goes straight out. The SM tells it what to do next through the internal `branch_en`/`branch_addr`:
 
 | This cycle | `branch_en` | `branch_addr` |
 |---|---|---|
 | Completed JMP (condition true), OUT PC or MOV PC | 1 | target |
-| Completed instruction from memory, at `WRAP_TOP`, no jump | 1 | `WRAP_BOTTOM` |
-| Completed instruction from memory, otherwise | 0 | `pc + 1` |
-| Anything else: stalled, delay cycle, no tick, disabled, EXEC'd or forced instruction | 1 | `pc` (hold) |
+| Completed instruction at `WRAP_TOP`, no jump | 1 | `WRAP_BOTTOM` |
+| Completed instruction, otherwise | 0 | `pc + 1` |
+| Anything else: stalled, delay cycle, no tick, disabled | 1 | `pc` (hold) |
 
 Holding works by "branching to the current address", so the PC only needs a load and an increment. `branch_addr` is **always** the next PC, which also makes it a good address for a synchronous-read instruction memory.
 
-`pc_en` is tied high, since holds are done with branches. `rst_n` is `!rst`; note the PC's reset is asynchronous while the rest of `sm` resets synchronously.
+`pc_en` is tied high, since holds are done with branches. `rst_n` is `!rst`; note the PC's reset is asynchronous while the rest of the SM resets synchronously.
 
 ## 10. State registers
 
 The `always_ff @(posedge clk)` block holds the SM's own state:
 
-- **`delay_cnt`** loads the instruction's delay when it completes, then counts down on each `ce`. While it is nonzero, `run_prog` is 0. Delay starts only after a stall ends, because it loads on `done`. Forced instructions and OUT/MOV EXEC ignore their own delay.
+- **`delay_cnt`** loads the instruction's delay when it completes, then counts down on each `ce`. While it is nonzero, `active` is 0. Delay starts only after a stall ends, because it loads on `done`.
 - **`irq_waiting`** is set on the first cycle of `irq wait` and cleared when the instruction completes.
 - **`rst` / `restart`** clear all of the above. `restart` also clears the ISR and resets the OSR count to 32, but keeps X, Y and the PC.
 
+## 11. Differences from RP2040
+
+- **No SMx_INSTR.** The host cannot force an instruction; there are no `force_valid` / `force_instr` / `exec_stalled` ports.
+- **No OUT EXEC / MOV EXEC.** `out exec, n` still shifts the OSR (and can autopull) but discards the data; `mov exec, src` does nothing. Both complete normally and the PC moves on.
 - OUT_STICKY, INLINE_OUT_EN / OUT_EN_SEL and FJOIN are not implemented. FJOIN belongs on the FIFO side anyway.
 - `restart` also zeroes the OSR contents, because `osr.sv` has no "reset the count only" input.
 - Reserved encodings (MOV destination 3, WAIT source 3, unused SET destinations) do nothing.
@@ -302,5 +303,5 @@ The `always_ff @(posedge clk)` block holds the SM's own state:
 
 - **FIFO:** `tx_data` must show the oldest word while `tx_empty` is 0. The current `fifo.sv` outputs data one cycle *after* `r_en` and keeps `full`/`empty` internal. It needs a fall-through output plus `full`, `empty` and level ports.
 - **Timing:** the regfile's write path has half a clock period (rising edge to falling edge). Testbench inputs should change just after the rising edge, not at the falling edge.
-- **X and Y have no reset.** Programs (or the host, through forced instructions) must initialise them.
-- **Tests:** run `make sim_tb_sm` from `test/`. `test/modules/tb_sm.sv` runs 17 groups of small PIO programs against this module.
+- **X and Y have no reset.** Programs must initialise them (there is no forced-instruction path for the host to do it).
+- **Tests:** run `make sim_tb_sm_no_smx_instr` from `test/`. `test/modules/tb_sm_no_smx_instr.sv` runs 16 groups of small PIO programs against this module.
