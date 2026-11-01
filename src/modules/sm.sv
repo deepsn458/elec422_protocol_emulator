@@ -26,6 +26,12 @@
 // [4:0] arg2. Configuration inputs use the RP2040 SMx_CLKDIV, SMx_EXECCTRL,
 // SMx_SHIFTCTRL and SMx_PINCTRL bit layouts.
 //
+// GPIOs: NUM_GPIO (2, 4, 8, 16 or 32) pins. The RP2040 has 32. With fewer,
+// pin ranges wrap at NUM_GPIO instead of 32, and the GPIO-number fields
+// (IN_BASE, SIDESET_BASE, SET_BASE, OUT_BASE, JMP_PIN, the WAIT GPIO/PIN
+// index) use only their low $clog2(NUM_GPIO) bits, i.e. they are taken
+// modulo NUM_GPIO. IN PINS and MOV from PINS read 0 above NUM_GPIO.
+//
 // Differences from RP2040: OUT_STICKY, INLINE_OUT_EN and FJOIN are not
 // implemented, and SM_RESTART also clears the OSR contents (RP2040 keeps
 // them). A forced instruction that stalls is retried on every clock,
@@ -34,7 +40,8 @@
 `default_nettype none
 
 module sm #(
-  parameter logic [1:0] SM_ID = 2'd0      // state machine number, for IRQ rel
+  parameter logic [1:0]  SM_ID    = 2'd0, // state machine number, for IRQ rel
+  parameter int unsigned NUM_GPIO = 32    // GPIO count: 2, 4, 8, 16 or 32
 ) (
   input  logic        clk,
   input  logic        rst,                 // synchronous, active high
@@ -72,12 +79,12 @@ module sm #(
   input  logic [2:0]  rx_level,
   output logic        rx_push,
 
-  // GPIO: 32-bit write masks and data for pin levels and directions
-  input  logic [31:0] gpio_in,
-  output logic [31:0] pins_we,
-  output logic [31:0] pins_wdata,
-  output logic [31:0] dirs_we,
-  output logic [31:0] dirs_wdata,
+  // GPIO: NUM_GPIO-bit write masks and data for pin levels and directions
+  input  logic [NUM_GPIO-1:0] gpio_in,
+  output logic [NUM_GPIO-1:0] pins_we,
+  output logic [NUM_GPIO-1:0] pins_wdata,
+  output logic [NUM_GPIO-1:0] dirs_we,
+  output logic [NUM_GPIO-1:0] dirs_wdata,
 
   // IRQ flags shared by all state machines
   input  logic [7:0]  irq_flags,
@@ -86,6 +93,11 @@ module sm #(
 );
 
   localparam logic [5:0] FULL = 6'd32;
+  localparam int GW = $clog2(NUM_GPIO);   // bits in a GPIO number
+
+  if (NUM_GPIO < 2 || NUM_GPIO > 32 || (NUM_GPIO & (NUM_GPIO - 1)) != 0) begin : g_bad_num_gpio
+    $error("sm: NUM_GPIO must be 2, 4, 8, 16 or 32");
+  end
 
   // OUT destinations
   localparam logic [2:0] OUT_PINS    = 3'd0;
@@ -115,19 +127,24 @@ module sm #(
   // Helpers
   // ---------------------------------------------------------------------------
 
-  // Low n bits set, n = 0..32 (1 << 32 is 0, so 0 - 1 gives all ones).
-  function automatic logic [31:0] lowmask(input logic [5:0] n);
-    return (32'h1 << n) - 32'h1;
+  // GPIO mask with the low n bits set, n = 0..32. Saturates at NUM_GPIO.
+  function automatic logic [NUM_GPIO-1:0] lowmask(input logic [5:0] n);
+    logic [NUM_GPIO-1:0] one;
+    one = 1;
+    return (n >= NUM_GPIO) ? '1 : (one << n) - one;
   endfunction
 
-  // Rotate left by s: maps bit 0 to GPIO s, wrapping after GPIO 31.
-  function automatic logic [31:0] rotl(input logic [31:0] v, input logic [4:0] s);
-    return (v << s) | (v >> (6'd32 - {1'b0, s}));
+  // Rotate left by s: maps bit 0 to GPIO s, wrapping after the last GPIO.
+  // A shift by NUM_GPIO (s = 0) gives 0.
+  function automatic logic [NUM_GPIO-1:0] rotl(input logic [NUM_GPIO-1:0] v,
+                                               input logic [GW-1:0] s);
+    return (v << s) | (v >> (NUM_GPIO - s));
   endfunction
 
   // Rotate right by s: GPIO s becomes bit 0.
-  function automatic logic [31:0] rotr(input logic [31:0] v, input logic [4:0] s);
-    return (v >> s) | (v << (6'd32 - {1'b0, s}));
+  function automatic logic [NUM_GPIO-1:0] rotr(input logic [NUM_GPIO-1:0] v,
+                                               input logic [GW-1:0] s);
+    return (v >> s) | (v << (NUM_GPIO - s));
   endfunction
 
   function automatic logic [31:0] bitrev(input logic [31:0] v);
@@ -147,20 +164,21 @@ module sm #(
   // ---------------------------------------------------------------------------
 
   logic        side_en, side_pindir;
-  logic [4:0]  jmp_pin, wrap_top, wrap_bottom;
+  logic [GW-1:0] jmp_pin;
+  logic [4:0]  wrap_top, wrap_bottom;
   logic        status_sel;
   logic [3:0]  status_n;
   logic [5:0]  pull_thresh, push_thresh;
   logic        out_dir, in_dir, autopull, autopush;
   logic [2:0]  sideset_count, set_count;
   logic [5:0]  out_count;
-  logic [4:0]  in_base, sideset_base, set_base, out_base;
+  logic [GW-1:0] in_base, sideset_base, set_base, out_base;
   logic [15:0] div_int;
   logic [7:0]  div_frac;
 
   assign side_en       = execctrl[30];
   assign side_pindir   = execctrl[29];
-  assign jmp_pin       = execctrl[28:24];
+  assign jmp_pin       = execctrl[24 +: GW];       // GPIO numbers: modulo NUM_GPIO
   assign wrap_top      = execctrl[16:12];
   assign wrap_bottom   = execctrl[11:7];
   assign status_sel    = execctrl[4];
@@ -176,10 +194,10 @@ module sm #(
   assign sideset_count = (pinctrl[31:29] > 3'd5) ? 3'd5 : pinctrl[31:29];
   assign set_count     = (pinctrl[28:26] > 3'd5) ? 3'd5 : pinctrl[28:26];
   assign out_count     = (pinctrl[25:20] > FULL) ? FULL : pinctrl[25:20];
-  assign in_base       = pinctrl[19:15];
-  assign sideset_base  = pinctrl[14:10];
-  assign set_base      = pinctrl[9:5];
-  assign out_base      = pinctrl[4:0];
+  assign in_base       = pinctrl[15 +: GW];
+  assign sideset_base  = pinctrl[10 +: GW];
+  assign set_base      = pinctrl[5 +: GW];
+  assign out_base      = pinctrl[0 +: GW];
 
   assign div_int       = clkdiv[31:16];
   assign div_frac      = clkdiv[15:8];
@@ -373,20 +391,26 @@ module sm #(
   );
 
   // Side-set data and mask, mapped onto the GPIOs from SIDESET_BASE.
-  logic [31:0] ss_mask, ss_data;
+  logic [NUM_GPIO-1:0] ss_mask, ss_data;
+  logic [31:0]         ss_value32;
 
+  assign ss_value32 = {27'd0, ss_value};
   assign ss_mask = rotl(lowmask({3'd0, ss_bits}), sideset_base);
-  assign ss_data = rotl({27'd0, ss_value}, sideset_base) & ss_mask;
+  assign ss_data = rotl(ss_value32[NUM_GPIO-1:0], sideset_base) & ss_mask;
 
   // ---------------------------------------------------------------------------
   // Operands
   // ---------------------------------------------------------------------------
 
-  logic [31:0] in_pins;          // GPIOs rotated so IN_BASE is bit 0
+  logic [NUM_GPIO-1:0] in_rot;   // GPIOs rotated so IN_BASE is bit 0
+  logic [31:0] in_pins;          // in_rot zero-extended to 32 bits
+  logic [GW-1:0] wait_idx;       // WAIT GPIO/PIN index, modulo NUM_GPIO
   logic [31:0] status;
   logic [31:0] in_src, mov_src, mov_val;
 
-  assign in_pins = rotr(gpio_in, in_base);
+  assign in_rot   = rotr(gpio_in, in_base);
+  assign in_pins  = in_rot;
+  assign wait_idx = arg2[GW-1:0];
   assign status  = ({1'b0, (status_sel ? rx_level : tx_level)} < status_n) ? 32'hFFFF_FFFF : 32'd0;
 
   always_comb begin
@@ -447,8 +471,8 @@ module sm #(
   logic wait_bit;
   always_comb begin
     case (wait_src)
-      2'd0:    wait_bit = gpio_in[arg2];
-      2'd1:    wait_bit = in_pins[arg2];
+      2'd0:    wait_bit = gpio_in[wait_idx];
+      2'd1:    wait_bit = in_rot[wait_idx];
       2'd2:    wait_bit = irq_flags[irq_idx];
       default: wait_bit = wait_pol;                 // reserved: never waits
     endcase
@@ -534,8 +558,9 @@ module sm #(
   // Pins. OUT and MOV use the OUT mapping, SET the SET mapping. Side-set
   // happens on every active cycle, stalled or not, and wins on overlap.
   logic        os_pins, os_dirs;
-  logic [31:0] os_raw, os_mask, os_data;
-  logic [31:0] side_pins_m, side_dirs_m, os_pins_m, os_dirs_m;
+  logic [31:0]         os_raw;
+  logic [NUM_GPIO-1:0] os_mask, os_data;
+  logic [NUM_GPIO-1:0] side_pins_m, side_dirs_m, os_pins_m, os_dirs_m;
 
   assign os_pins = done && ((is_out && arg1 == OUT_PINS) || (is_mov && arg1 == MOV_PINS) ||
                             (is_set && arg1 == SET_PINS));
@@ -544,12 +569,12 @@ module sm #(
                    is_out ? out_data : mov_val;
   assign os_mask = rotl(lowmask(is_set ? {3'd0, set_count} : out_count),
                         is_set ? set_base : out_base);
-  assign os_data = rotl(os_raw, is_set ? set_base : out_base) & os_mask;
+  assign os_data = rotl(os_raw[NUM_GPIO-1:0], is_set ? set_base : out_base) & os_mask;
 
-  assign side_pins_m = (active && ss_valid && !side_pindir) ? ss_mask : 32'd0;
-  assign side_dirs_m = (active && ss_valid &&  side_pindir) ? ss_mask : 32'd0;
-  assign os_pins_m   = os_pins ? os_mask : 32'd0;
-  assign os_dirs_m   = os_dirs ? os_mask : 32'd0;
+  assign side_pins_m = (active && ss_valid && !side_pindir) ? ss_mask : '0;
+  assign side_dirs_m = (active && ss_valid &&  side_pindir) ? ss_mask : '0;
+  assign os_pins_m   = os_pins ? os_mask : '0;
+  assign os_dirs_m   = os_dirs ? os_mask : '0;
 
   assign pins_we    = os_pins_m | side_pins_m;
   assign pins_wdata = (os_data & os_pins_m & ~side_pins_m) | (ss_data & side_pins_m);
