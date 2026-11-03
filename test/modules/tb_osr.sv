@@ -86,15 +86,17 @@ module tb_osr;
             load = 0;
             shift  = 1;
             dir = 0;
+          #0.01;
+            if (shifted != 8'h0A) begin  //shifted output appears combinationally
+                failures++;
+                $error("shifted output incorrect %h", shifted);
+            end
+
             @(posedge clk);
             #0.01;
             if (q != 8'h50 || cnt != 4) begin
                 failures++;
                 $error ("osr contents not preserved %h, cnt %d", q, cnt);
-            end
-            if (shifted != 8'h0A) begin
-                failures++;
-                $error("shifted output incorrect %h", shifted);
             end
         endtask
        
@@ -104,15 +106,17 @@ module tb_osr;
             shift = 1;
             load = 0;
             dir = 1;
+            #0.01;
+            if (shifted != 8'h05) begin  //shifted output appears combinationally
+                failures++;
+                $error("shifted output incorrect %h. Rest: %h", shifted, dut.rest);
+            end
+
             @(posedge clk);
             #0.01;
             if (q != 8'h0A || cnt != 4) begin
                 failures++;
                 $error ("osr contents not preserved %h, cnt %d", q, cnt);
-            end
-            if (shifted != 8'h05) begin
-                failures++;
-                $error("shifted output incorrect %h. Rest: %h", shifted, dut.rest);
             end
         endtask
 

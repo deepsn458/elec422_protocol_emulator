@@ -17,6 +17,8 @@ MODULE_NAMES = $(patsubst tb_%.sv,%,$(notdir $(wildcard $(MODULE_DIR)/tb_*.sv)))
 MODULE_SIM_TARGETS = $(addprefix sim_tb_,$(MODULE_NAMES))
 MODULE_COCOTB_NAMES = $(filter $(MODULE_NAMES),$(patsubst test_%.py,%,$(notdir $(wildcard $(MODULE_DIR)/test_*.py))))
 MODULE_COCOTB_TARGETS = $(addprefix cocotb_tb_,$(MODULE_COCOTB_NAMES))
+SM_SUBMODULE_SOURCES = $(addprefix $(SRC_DIR)/modules/,decode.sv isr.sv osr.sv regfile.sv clockdiv.sv program_counter.sv)
+SM_SIM_EXES = $(addprefix $(SIM_OUTPUTS)/modules/sv/,$(addsuffix .$(WAVEFORM_EXT).vvp,sm sm_no_smx_instr))
 
 .DEFAULT_GOAL := all
 .PHONY: all $(MODULE_SIM_TARGETS) $(MODULE_COCOTB_TARGETS)
@@ -27,6 +29,11 @@ $(MODULE_SIM_TARGETS): sim_tb_%: $(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp
 	vvp $< $(FST)
 
 $(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_%.sv $(SRC_DIR)/modules/%.sv
+	mkdir -p $(@D)
+	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/$*.$(WAVEFORM_EXT)\" -s tb_$* -o $@ $^
+
+# Both state-machine variants instantiate these shared submodules.
+$(SM_SIM_EXES): $(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_%.sv $(SRC_DIR)/modules/%.sv $(SM_SUBMODULE_SOURCES)
 	mkdir -p $(@D)
 	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/$*.$(WAVEFORM_EXT)\" -s tb_$* -o $@ $^
 

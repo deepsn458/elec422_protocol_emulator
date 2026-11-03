@@ -40,14 +40,13 @@ module osr #(
   logic [DATA_WIDTH-1:0] mask;           // low n_eff bits set
   logic [DATA_WIDTH-1:0] rest;           // q after the shift
   logic [DW_BITS+1:0] cnt_sum;           // cnt + n_eff before saturation
-  logic [DATA_WIDTH-1:0] shifted_comb;
 
   assign n_eff = (n == '0) ? FULL : {1'b0, n};
   assign mask = (DATA_WIDTH'(1) << n_eff) - DATA_WIDTH'(1);
 
   // Right: take the low bits, then move the remaining bits down.
   // Left: take the high bits and right-align them, then move the rest up.
-  assign shifted_comb = dir ? (q & mask) : (q >> (FULL - n_eff));
+  assign shifted = dir ? (q & mask) : (q >> (FULL - n_eff));
   assign rest    = dir ? (q >> n_eff) : (q << n_eff);
 
   assign cnt_sum   = {1'b0, cnt} + {1'b0, n_eff};
@@ -64,7 +63,6 @@ module osr #(
       end else if (shift) begin
         q   <= rest;
         cnt <= shift_cnt;
-        shifted <= shifted_comb;
       end
     end
   end
