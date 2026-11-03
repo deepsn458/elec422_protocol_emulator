@@ -15,6 +15,17 @@ For a module named `fifo`, place its RTL at `src/modules/fifo.sv` and its testbe
 make sim_tb_fifo
 ```
 
+The state-machine tests also compile the six submodules instantiated by their
+DUTs. Run either test from `test/` with:
+
+```sh
+make sim_tb_sm
+make sim_tb_sm_no_smx_instr
+```
+
+For other modules with submodules, add their RTL dependencies to [Makefile](Makefile)
+before using `make sim_tb_<name>`.
+
 To produce a VCD waveform, pass `FST=`:
 
 ```sh
