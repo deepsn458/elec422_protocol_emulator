@@ -153,6 +153,63 @@ module tb_sm;
     end
     assign gpio_in = (gpio_oe & gpio_out) | (~gpio_oe & ext_in);
 
+    // A second SM with NUM_GPIO = 8, for the pin-wrap tests (group 18). It
+    // shares the host side, instruction memory, TX FIFO and IRQ flags with
+    // dut and runs the same programs; only its PC, registers and pins are
+    // checked. Its FIFO and IRQ outputs are ignored.
+    wire [4:0] pc8;
+    wire read_en8;
+    wire exec_stalled8, tx_pop8, rx_push8;
+    wire [31:0] rx_data8;
+    wire [7:0] irq_set8, irq_clr8;
+    wire [7:0] gpio8_in, pins8_we, pins8_wdata, dirs8_we, dirs8_wdata;
+    reg [7:0] gpio8_out, gpio8_oe, ext8;
+
+    sm #(.SM_ID(SM_ID), .NUM_GPIO(8)) dut8 (
+        .clk(clk),
+        .rst(rst),
+        .en(en),
+        .restart(restart),
+        .clkdiv_restart(clkdiv_restart),
+        .clkdiv(clkdiv),
+        .execctrl(execctrl),
+        .shiftctrl(shiftctrl),
+        .pinctrl(pinctrl),
+        .force_valid(force_valid),
+        .force_instr(force_instr),
+        .exec_stalled(exec_stalled8),
+        .mem_addr(pc8),
+        .read_en(read_en8),
+        .instr(imem[pc8]),
+        .tx_data(tx_data),
+        .tx_empty(tx_empty),
+        .tx_level(tx_level),
+        .tx_pop(tx_pop8),
+        .rx_data(rx_data8),
+        .rx_full(rx_full),
+        .rx_level(rx_level),
+        .rx_push(rx_push8),
+        .gpio_in(gpio8_in),
+        .pins_we(pins8_we),
+        .pins_wdata(pins8_wdata),
+        .dirs_we(dirs8_we),
+        .dirs_wdata(dirs8_wdata),
+        .irq_flags(irq_flags),
+        .irq_set(irq_set8),
+        .irq_clr(irq_clr8)
+    );
+
+    always @(posedge clk) begin
+        if (rst) begin
+            gpio8_out <= 8'd0;
+            gpio8_oe <= 8'd0;
+        end else begin
+            gpio8_out <= (gpio8_out & ~pins8_we) | (pins8_wdata & pins8_we);
+            gpio8_oe <= (gpio8_oe & ~dirs8_we) | (dirs8_wdata & dirs8_we);
+        end
+    end
+    assign gpio8_in = (gpio8_oe & gpio8_out) | (~gpio8_oe & ext8);
+
     initial begin
         $dumpfile(`TB_DUMPFILE);
         $dumpvars(0, tb_sm);
@@ -294,6 +351,7 @@ module tb_sm;
         host_irq_set = 0;
         host_irq_clr = 0;
         ext_in = 0;
+        ext8 = 0;
         clkdiv = 32'h0001_0000;
         execctrl = 32'h0001_F000;
         shiftctrl = 32'h000C_0000;
@@ -1154,6 +1212,108 @@ module tb_sm;
             step(40 * div);
             check(gpio_out[4], 1, "uart: idle after frames");
             check(pc, 0, "uart: waiting on PULL");
+        end
+
+        // ====================================================================
+        // 18. NUM_GPIO = 8: pin ranges wrap at GPIO 7, GPIO numbers are
+        //     taken modulo 8 (dut8; dut shows the 32-GPIO result)
+        // ====================================================================
+        // SET pins 6, 7, 0, 1. SET_BASE 14 is the same as 6.
+        for (int base = 6; base <= 14; base += 8) begin
+            reset_all();
+            imem[0] = i_set(S_PINDIRS, 5'b01111);
+            imem[1] = i_set(S_PINS, 5'b00101);
+            imem[2] = i_jmp(C_ALWAYS, 2);
+            pinctrl = pinctrl_f(0, 4, 0, 0, 0, base[4:0], 0);
+            start();
+            step(2);
+            check(gpio8_oe, 8'hC3, $sformatf("gpio8: set pindirs wrap, base %0d", base));
+            check(gpio8_out, 8'h41, $sformatf("gpio8: set pins wrap, base %0d", base));
+            if (base == 6) begin
+                check(gpio_oe, 32'h0000_03C0, "gpio32: set pindirs, no wrap");
+                check(gpio_out, 32'h0000_0140, "gpio32: set pins, no wrap");
+            end
+        end
+
+        // MOV PINS with OUT_COUNT 32 writes all 8 pins, rotated by OUT_BASE
+        // (13 = 5 modulo 8).
+        reset_all();
+        load_xy(32'h1234_56A5, 32'd5);
+        check(dut8.x, 32'h1234_56A5, "gpio8: load_xy X");
+        imem[0] = i_mov(MD_PINS, MOP_NONE, MS_X);
+        imem[1] = i_jmp(C_ALWAYS, 1);
+        pinctrl = pinctrl_f(0, 0, 32, 0, 0, 0, 13);
+        start();
+        #1;
+        check(pins8_we, 8'hFF, "gpio8: out_count 32 saturates");
+        step(1);
+        check(gpio8_out, 8'hB4, "gpio8: mov pins rotl(0xA5, 5)");
+
+        // OUT_COUNT 3 at OUT_BASE 6: pins 6, 7, 0.
+        reset_all();
+        load_xy(32'hFFFF_FFFD, 32'd0);                  // ...1101
+        imem[0] = i_mov(MD_PINS, MOP_NONE, MS_X);
+        imem[1] = i_jmp(C_ALWAYS, 1);
+        pinctrl = pinctrl_f(0, 0, 3, 0, 0, 0, 6);
+        start();
+        #1;
+        check(pins8_we, 8'hC1, "gpio8: out mask wraps");
+        step(1);
+        check(gpio8_out, 8'h41, "gpio8: out data wraps");
+
+        // Side-set on pins 7 and 0 (SIDESET_BASE 15 = 7 modulo 8).
+        reset_all();
+        imem[0] = dss(i_jmp(C_ALWAYS, 0), 5'b11000);    // side 0b11
+        pinctrl = pinctrl_f(2, 0, 0, 0, 15, 0, 0);
+        start();
+        step(1);
+        check(gpio8_out, 8'h81, "gpio8: side-set wraps");
+
+        // MOV X, PINS with IN_BASE 6 reads GPIO 6, 7, 0..5; bits 8+ read 0.
+        // IN_BASE 13 (= 5, odd) reads GPIO 5, 6, 7, 0..4.
+        for (int base = 6; base <= 13; base += 7) begin
+            reset_all();
+            ext8 = 8'b1100_0011;
+            imem[0] = i_mov(MD_X, MOP_NONE, MS_PINS);
+            imem[1] = i_jmp(C_ALWAYS, 1);
+            pinctrl = pinctrl_f(0, 0, 0, base[4:0], 0, 0, 0);
+            start();
+            step(1);
+            check(dut8.x, (base == 6) ? 32'h0000_000F : 32'h0000_001E,
+                  $sformatf("gpio8: in pins, IN_BASE %0d", base));
+        end
+
+        // WAIT 1 PIN 3 with IN_BASE 6 waits on GPIO 1; WAIT 1 GPIO 10 waits
+        // on GPIO 2. JMP_PIN 11 tests GPIO 3.
+        for (int k = 0; k < 3; k++) begin
+            reset_all();
+            imem[0] = (k == 0) ? i_wait(1, W_PIN, 3) :
+                      (k == 1) ? i_wait(1, W_GPIO, 10) : i_jmp(C_PIN, 5);
+            imem[1] = i_jmp(C_ALWAYS, 1);
+            imem[5] = i_jmp(C_ALWAYS, 5);
+            pinctrl = pinctrl_f(0, 0, 0, 6, 0, 0, 0);
+            execctrl = execctrl_f(0, 0, 11, 31, 0, 0, 0);
+            if (k == 2) begin
+                start();
+                step(1);
+                check(pc8, 1, "gpio8: jmp pin low");
+                reset_all();
+                imem[0] = i_jmp(C_PIN, 5);
+                imem[5] = i_jmp(C_ALWAYS, 5);
+                execctrl = execctrl_f(0, 0, 11, 31, 0, 0, 0);
+                ext8 = 8'b0000_1000;
+                start();
+                step(1);
+                check(pc8, 5, "gpio8: jmp pin 11 is GPIO 3");
+            end else begin
+                ext8 = 8'hFF & ~((k == 0) ? 8'b0000_0010 : 8'b0000_0100);
+                start();
+                step(3);
+                check(pc8, 0, $sformatf("gpio8: wait %0d stalls", k));
+                ext8 = 8'hFF;
+                step(1);
+                check(pc8, 1, $sformatf("gpio8: wait %0d completes", k));
+            end
         end
 
         $display("SM SystemVerilog test passed");
