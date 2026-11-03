@@ -270,7 +270,9 @@ module sm #(
   logic [31:0] isr_q, isr_shift_q;
   logic [5:0]  isr_cnt, isr_shift_cnt;
 
-  isr u_isr (
+  isr #(
+    .DATA_WIDTH (32)
+  ) u_isr (
     .clk       (clk),
     .rst       (rst | restart | isr_clear),
     .ce        (1'b1),
@@ -291,7 +293,9 @@ module sm #(
   logic [31:0] osr_q, out_data;
   logic [5:0]  osr_cnt, osr_shift_cnt;
 
-  osr u_osr (
+  osr #(
+    .DATA_WIDTH (32)
+  ) u_osr (
     .clk       (clk),
     .rst       (rst | restart),
     .ce        (1'b1),
