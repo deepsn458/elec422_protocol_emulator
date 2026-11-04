@@ -6,6 +6,10 @@
 module tb_sm;
     // SM_ID = 1 so that relative IRQ indices differ from absolute ones.
     localparam [1:0] SM_ID = 2'd1;
+    localparam int NUM_GPIO = 32;
+    localparam int BITCOUNT = $clog2(NUM_GPIO); // Bits needed to encode a GPIO index.
+    localparam int NUM_GPIO_WRAP = 8;
+    localparam logic [BITCOUNT-1:0] TEST_JMP_PIN = BITCOUNT'(6);
 
     reg clk;
     reg rst;
@@ -31,16 +35,16 @@ module tb_sm;
     wire rx_full;
     wire [2:0] rx_level;
     wire rx_push;
-    wire [31:0] gpio_in;
-    wire [31:0] pins_we;
-    wire [31:0] pins_wdata;
-    wire [31:0] dirs_we;
-    wire [31:0] dirs_wdata;
+    wire [NUM_GPIO-1:0] gpio_in;
+    wire [NUM_GPIO-1:0] pins_we;
+    wire [NUM_GPIO-1:0] pins_wdata;
+    wire [NUM_GPIO-1:0] dirs_we;
+    wire [NUM_GPIO-1:0] dirs_wdata;
     reg [7:0] irq_flags;
     wire [7:0] irq_set;
     wire [7:0] irq_clr;
 
-    sm #(.SM_ID(SM_ID)) dut (
+    sm #(.SM_ID(SM_ID), .NUM_GPIO(NUM_GPIO)) dut (
         .clk(clk),
         .rst(rst),
         .en(en),
@@ -141,11 +145,11 @@ module tb_sm;
 
     // GPIO output level and direction registers. Pins driven by the SM read
     // back their own level; other pins read the external value ext_in.
-    reg [31:0] gpio_out, gpio_oe, ext_in;
+    reg [NUM_GPIO-1:0] gpio_out, gpio_oe, ext_in;
     always @(posedge clk) begin
         if (rst) begin
-            gpio_out <= 32'd0;
-            gpio_oe <= 32'd0;
+            gpio_out <= '0;
+            gpio_oe <= '0;
         end else begin
             gpio_out <= (gpio_out & ~pins_we) | (pins_wdata & pins_we);
             gpio_oe <= (gpio_oe & ~dirs_we) | (dirs_wdata & dirs_we);
@@ -162,10 +166,10 @@ module tb_sm;
     wire exec_stalled8, tx_pop8, rx_push8;
     wire [31:0] rx_data8;
     wire [7:0] irq_set8, irq_clr8;
-    wire [7:0] gpio8_in, pins8_we, pins8_wdata, dirs8_we, dirs8_wdata;
-    reg [7:0] gpio8_out, gpio8_oe, ext8;
+    wire [NUM_GPIO_WRAP-1:0] gpio8_in, pins8_we, pins8_wdata, dirs8_we, dirs8_wdata;
+    reg [NUM_GPIO_WRAP-1:0] gpio8_out, gpio8_oe, ext8;
 
-    sm #(.SM_ID(SM_ID), .NUM_GPIO(8)) dut8 (
+    sm #(.SM_ID(SM_ID), .NUM_GPIO(NUM_GPIO_WRAP)) dut8 (
         .clk(clk),
         .rst(rst),
         .en(en),
@@ -201,8 +205,8 @@ module tb_sm;
 
     always @(posedge clk) begin
         if (rst) begin
-            gpio8_out <= 8'd0;
-            gpio8_oe <= 8'd0;
+            gpio8_out <= '0;
+            gpio8_oe <= '0;
         end else begin
             gpio8_out <= (gpio8_out & ~pins8_we) | (pins8_wdata & pins8_we);
             gpio8_oe <= (gpio8_oe & ~dirs8_we) | (dirs8_wdata & dirs8_we);
@@ -452,13 +456,8 @@ module tb_sm;
         data = frame[8:1];
     endtask
 
-    reg [31:0] word;
-    reg [7:0] byte_rx;
-    int ticks;
-
-    initial begin
+    task automatic test_instruction_encoders();
         reset_all();
-
         // ====================================================================
         // 1. Encoders match pioasm output from the datasheet
         // ====================================================================
@@ -472,7 +471,9 @@ module tb_sm;
         check(dss(i_set(S_X, 7), 5'h17), 16'hF727, "uart_tx: set x, 7 side 0 [7]");
         check(i_out(O_PINS, 1), 16'h6001, "uart_tx: out pins, 1");
         check(dss(i_jmp(C_X_DEC, 2), 5'h06), 16'h0642, "uart_tx: jmp x-- 2 [6]");
+    endtask
 
+    task automatic test_set_and_wrap();
         // ====================================================================
         // 2. One instruction per cycle, SET, and program wrap
         //    (squarewave_fast: wrap_target = 1, wrap = 2)
@@ -500,7 +501,9 @@ module tb_sm;
             check(gpio_out[3], (i % 2 == 0), "squarewave level");
             check(pc, (i % 2 == 0) ? 2 : 1, "squarewave pc");
         end
+    endtask
 
+    task automatic test_delay();
         // ====================================================================
         // 3. Delay cycles hold the PC (squarewave_wrap: period 4)
         // ====================================================================
@@ -518,7 +521,11 @@ module tb_sm;
             check(pc, ((i % 4) < 2) ? 2 : 1, "delayed squarewave pc");
             check(dut.delay_cnt, (i % 2 == 0) ? 1 : 0, "delay counter");
         end
+    endtask
 
+    task automatic test_clock_divider_and_enable();
+        reg [31:0] word;
+        int ticks;
         // ====================================================================
         // 4. Clock divider and SM enable
         // ====================================================================
@@ -557,12 +564,14 @@ module tb_sm;
             step(1);
         end
         check(ticks, 40, "instructions in 100 cycles at divisor 2.5");
+    endtask
 
+    task automatic test_jmp_conditions();
         // ====================================================================
         // 5. JMP conditions, taken and not taken
         // ====================================================================
         reset_all();
-        execctrl = execctrl_f(0, 0, 9, 31, 0, 0, 0);     // JMP_PIN = GPIO 9
+        execctrl = execctrl_f(0, 0, TEST_JMP_PIN, 31, 0, 0, 0);
         check_jmp(C_ALWAYS, 1, NOP, NOP, NOP, "jmp always");
         reset_all();
         check_jmp(C_NOT_X, 1, i_set(S_X, 0), NOP, NOP, "jmp !x, x = 0");
@@ -589,13 +598,13 @@ module tb_sm;
         reset_all();
         check_jmp(C_X_NE_Y, 1, i_set(S_X, 3), i_set(S_Y, 4), NOP, "jmp x!=y, different");
         reset_all();
-        execctrl = execctrl_f(0, 0, 9, 31, 0, 0, 0);
-        ext_in[9] = 1;
+        execctrl = execctrl_f(0, 0, TEST_JMP_PIN, 31, 0, 0, 0);
+        ext_in[TEST_JMP_PIN] = 1;
         check_jmp(C_PIN, 1, NOP, NOP, NOP, "jmp pin, pin high");
         reset_all();
-        execctrl = execctrl_f(0, 0, 9, 31, 0, 0, 0);
-        ext_in[8] = 1;
-        ext_in[10] = 1;
+        execctrl = execctrl_f(0, 0, TEST_JMP_PIN, 31, 0, 0, 0);
+        ext_in[5] = 1;
+        ext_in[7] = 1;
         check_jmp(C_PIN, 0, NOP, NOP, NOP, "jmp pin, pin low");
         // !OSRE: the OSR is empty after reset, full after a PULL.
         reset_all();
@@ -612,7 +621,9 @@ module tb_sm;
         shiftctrl = shiftctrl_f(8, 0, 1, 1, 0, 0);
         tx_put(32'h1234_5678);
         check_jmp(C_NOT_OSRE, 0, i_pull(0, 1), i_out(O_NULL, 8), NOP, "jmp !osre, 8 of 8 bits out");
+    endtask
 
+    task automatic test_jmp_x_dec_loop();
         // ====================================================================
         // 6. X-- loop, cycle by cycle. The regfile writes X at the falling
         //    edge; the branch must still use X before the decrement.
@@ -633,7 +644,10 @@ module tb_sm;
             #1;
             check(pc, (i != 0) ? 1 : 2, "loop: pc");
         end
+    endtask
 
+    task automatic test_autopull_autopush_loopback();
+        reg [31:0] word;
         // ====================================================================
         // 7. Autopull and autopush loopback (datasheet figure 44)
         // ====================================================================
@@ -677,7 +691,9 @@ module tb_sm;
         check(rx_n, 5, "loopback: push after host read");
         check(rx_log[4], 32'h5555_5555, "loopback: fifth word");
         check(pc, 0, "loopback: IN completed");
+    endtask
 
+    task automatic test_shift_and_pin_instructions();
         // ====================================================================
         // 8. PULL, OUT PINS, IN PINS, PUSH in both shift directions
         // ====================================================================
@@ -691,7 +707,7 @@ module tb_sm;
             imem[5] = i_in(IN_PINS, 4);
             imem[6] = i_push(0, 1);
             imem[7] = i_jmp(C_ALWAYS, 7);
-            pinctrl = pinctrl_f(0, 4, 4, 8, 0, 8, 8);    // OUT, SET, IN on GPIO 8..11
+            pinctrl = pinctrl_f(0, 4, 4, 0, 0, 0, 0);    // OUT, SET, IN on GPIO 0..3
             if (dir == 0) begin
                 // OUT right (LSB first), IN left.
                 shiftctrl = shiftctrl_f(0, 0, 1, 0, 0, 0);
@@ -703,9 +719,9 @@ module tb_sm;
             end
             start();
             step(3);
-            check(gpio_out[11:8], (dir == 0) ? 4'h5 : 4'hA, "first nibble on pins");
+            check(gpio_out[3:0], (dir == 0) ? 4'h5 : 4'hA, "first nibble on pins");
             step(2);
-            check(gpio_out[11:8], (dir == 0) ? 4'hA : 4'h5, "second nibble on pins");
+            check(gpio_out[3:0], (dir == 0) ? 4'hA : 4'h5, "second nibble on pins");
             step(1);
             check(dut.isr_cnt, 8, "ISR count before push");
             check(dut.isr_q, (dir == 0) ? 32'h0000_005A : 32'h5A00_0000, "ISR before push");
@@ -715,7 +731,9 @@ module tb_sm;
             check(dut.isr_q, 0, "ISR cleared by push");
             check(dut.isr_cnt, 0, "ISR count cleared by push");
         end
+    endtask
 
+    task automatic test_pull_blocking();
         // ====================================================================
         // 9. Blocking, non-blocking and conditional PUSH / PULL
         // ====================================================================
@@ -736,7 +754,10 @@ module tb_sm;
         step(1);
         check(pc, 4, "pull block completes");
         check(dut.osr_q, 32'hCAFE_0001, "pull block data");
+    endtask
 
+    task automatic test_push_blocking();
+        reg [31:0] word;
         // PUSH NOBLOCK on a full RX FIFO drops the data; PUSH BLOCK stalls.
         reset_all();
         imem[0] = i_set(S_X, 9);
@@ -759,7 +780,9 @@ module tb_sm;
         check(rx_n, 1, "push block completes");
         check(rx_log[0], 9, "push block data");
         check(pc, 5, "push block pc");
+    endtask
 
+    task automatic test_pull_push_thresholds();
         // PULL IFEMPTY and PUSH IFFULL with thresholds of 8.
         reset_all();
         shiftctrl = shiftctrl_f(8, 8, 1, 0, 0, 0);
@@ -788,7 +811,9 @@ module tb_sm;
         step(2);
         check(rx_n, 1, "push iffull at threshold pushes");
         check(rx_log[0], 32'h33, "push iffull data");
+    endtask
 
+    task automatic test_pull_with_autopull();
         // With autopull, PULL is a no-op while the OSR is full, and the OSR
         // refills in the background between OUTs.
         reset_all();
@@ -822,7 +847,9 @@ module tb_sm;
         step(1);
         check(dut.osr_q, 32'hBEEF_0001, "background autopull");
         check(dut.osr_cnt, 0, "background autopull count");
+    endtask
 
+    task automatic test_mov();
         // ====================================================================
         // 10. MOV: operations, sources and destinations
         // ====================================================================
@@ -875,7 +902,9 @@ module tb_sm;
         start();
         step(1);
         check(dut.y, 32'hFFFF_FFFF, "mov y, status (RX empty < 1)");
+    endtask
 
+    task automatic test_sideset();
         // ====================================================================
         // 11. Side-set
         // ====================================================================
@@ -948,7 +977,9 @@ module tb_sm;
         step(1);
         check(gpio_out[6], 1, "side_pindir: set pins");
         check(gpio_oe[6], 1, "side_pindir: side-set to direction");
+    endtask
 
+    task automatic test_wait();
         // ====================================================================
         // 12. WAIT
         // ====================================================================
@@ -1011,7 +1042,9 @@ module tb_sm;
         step(1);
         check(pc, 3, "wait irq rel: flag 0");
         check(irq_flags, 8'h08, "wait irq rel: only flag 0 cleared");
+    endtask
 
+    task automatic test_irq();
         // ====================================================================
         // 13. IRQ set, clear, wait and relative indices
         // ====================================================================
@@ -1042,7 +1075,9 @@ module tb_sm;
         check(pc, 4, "irq wait: done after clear");
         step(1);
         check(dut.x, 30, "irq wait: next instruction");
+    endtask
 
+    task automatic test_exec_and_pc();
         // ====================================================================
         // 14. OUT EXEC, MOV EXEC, OUT PC, MOV PC
         // ====================================================================
@@ -1093,7 +1128,9 @@ module tb_sm;
         check(pc, 14, "mov pc");
         step(1);
         check(dut.x, 1, "after mov pc");
+    endtask
 
+    task automatic test_forced_instructions();
         // ====================================================================
         // 15. Forced instructions (SMx_INSTR)
         // ====================================================================
@@ -1140,7 +1177,9 @@ module tb_sm;
         check(exec_stalled, 0, "forced wait: completed");
         step(1);
         check(dut.x, 1, "forced wait: program resumes");
+    endtask
 
+    task automatic test_sm_restart();
         // ====================================================================
         // 16. SM_RESTART clears internal state but keeps X, Y and the PC
         // ====================================================================
@@ -1184,7 +1223,10 @@ module tb_sm;
         step(1);
         restart = 0;
         check(exec_stalled, 0, "restart: forced instruction dropped");
+    endtask
 
+    task automatic test_uart_tx();
+        reg [7:0] byte_rx;
         // ====================================================================
         // 17. End to end: uart_tx from the datasheet, at two baud rates
         // ====================================================================
@@ -1213,7 +1255,9 @@ module tb_sm;
             check(gpio_out[4], 1, "uart: idle after frames");
             check(pc, 0, "uart: waiting on PULL");
         end
+    endtask
 
+    task automatic test_gpio_wrap();
         // ====================================================================
         // 18. NUM_GPIO = 8: pin ranges wrap at GPIO 7, GPIO numbers are
         //     taken modulo 8 (dut8; dut shows the 32-GPIO result)
@@ -1315,6 +1359,30 @@ module tb_sm;
                 check(pc8, 1, $sformatf("gpio8: wait %0d completes", k));
             end
         end
+    endtask
+
+    initial begin
+        test_instruction_encoders();
+        test_set_and_wrap();
+        test_delay();
+        test_clock_divider_and_enable();
+        test_jmp_conditions();
+        test_jmp_x_dec_loop();
+        test_autopull_autopush_loopback();
+        test_shift_and_pin_instructions();
+        test_pull_blocking();
+        test_push_blocking();
+        test_pull_push_thresholds();
+        test_pull_with_autopull();
+        test_mov();
+        test_sideset();
+        test_wait();
+        test_irq();
+        test_exec_and_pc();
+        test_forced_instructions();
+        test_sm_restart();
+        test_uart_tx();
+        test_gpio_wrap();
 
         $display("SM SystemVerilog test passed");
         $finish;
