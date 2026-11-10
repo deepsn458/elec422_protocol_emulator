@@ -35,7 +35,6 @@ module fifo #(
     always @ (posedge clk) begin
         if (rst) begin
             wptr <= '0;
-            d_out <= '0;
         end else if (w_en & !full) begin
             mem[wptr[DEPTH_BITS-1:0]] <= d_in;
             wptr <= wptr + 1;
@@ -46,6 +45,7 @@ module fifo #(
     always @ (posedge clk) begin
         if (rst) begin
             rptr <= '0;
+            d_out <= '0;
         end else if (r_en & !empty) begin
             d_out <= mem[rptr[DEPTH_BITS-1:0]];
             rptr <= rptr + 1;

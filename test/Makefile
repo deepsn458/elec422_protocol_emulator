@@ -20,8 +20,21 @@ MODULE_COCOTB_TARGETS = $(addprefix cocotb_tb_,$(MODULE_COCOTB_NAMES))
 SM_SUBMODULE_SOURCES = $(addprefix $(SRC_DIR)/modules/,decode.sv isr.sv osr.sv regfile.sv clockdiv.sv program_counter.sv)
 SM_SIM_EXES = $(addprefix $(SIM_OUTPUTS)/modules/sv/,$(addsuffix .$(WAVEFORM_EXT).vvp,sm sm_no_smx_instr))
 
+# Integration tests wire several modules together. Glue RTL lives in
+# src/integration/ and testbenches in test/integration/. Both src/modules/ and
+# src/integration/ are Icarus library directories (-y), so any module whose
+# file is named <module>.sv is found without listing it.
+INT_SRC_DIR = $(SRC_DIR)/integration
+INT_DIR = $(CURDIR)/integration
+RTL_LIB_ARGS = -y $(SRC_DIR)/modules -y $(INT_SRC_DIR) -Y .sv -I$(SRC_DIR)/modules -I$(INT_SRC_DIR)
+RTL_LIB_SOURCES = $(wildcard $(SRC_DIR)/modules/*.sv) $(wildcard $(INT_SRC_DIR)/*.sv)
+INT_NAMES = $(patsubst tb_%.sv,%,$(notdir $(wildcard $(INT_DIR)/tb_*.sv)))
+INT_SIM_TARGETS = $(addprefix sim_int_,$(INT_NAMES))
+INT_COCOTB_NAMES = $(filter $(INT_NAMES),$(patsubst test_%.py,%,$(notdir $(wildcard $(INT_DIR)/test_*.py))))
+INT_COCOTB_TARGETS = $(addprefix cocotb_int_,$(INT_COCOTB_NAMES))
+
 .DEFAULT_GOAL := all
-.PHONY: all $(MODULE_SIM_TARGETS) $(MODULE_COCOTB_TARGETS)
+.PHONY: all $(MODULE_SIM_TARGETS) $(MODULE_COCOTB_TARGETS) $(INT_SIM_TARGETS) $(INT_COCOTB_TARGETS)
 
 # A module simulation runs each time it is requested, but recompiles only when
 # its testbench or DUT changes.
@@ -42,6 +55,21 @@ $(SIM_OUTPUTS)/modules/sv/ihp_sram.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_ihp_sra
 	mkdir -p $(@D)
 	iverilog -g2012 -DSV_TEST -DFUNCTIONAL -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/ihp_sram.$(WAVEFORM_EXT)\" -s tb_ihp_sram -o $@ $^
 
+# An integration simulation compiles only its testbench; every module it
+# instantiates is pulled from the library directories. It recompiles when the
+# testbench or any file in src/modules/ or src/integration/ changes.
+$(INT_SIM_TARGETS): sim_int_%: $(SIM_OUTPUTS)/integration/sv/%.$(WAVEFORM_EXT).vvp
+	vvp $< $(FST)
+
+$(SIM_OUTPUTS)/integration/sv/%.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_%.sv $(RTL_LIB_SOURCES)
+	mkdir -p $(@D)
+	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/integration/sv/$*.$(WAVEFORM_EXT)\" $(RTL_LIB_ARGS) -s tb_$* -o $@ $<
+
+$(INT_COCOTB_TARGETS): cocotb_int_%:
+	$(MAKE) --no-print-directory FLOW=cocotb INTEGRATION_NAME=$* sim
+	test -f $(SIM_OUTPUTS)/integration/cocotb/$*/results.xml
+	! grep -q failure $(SIM_OUTPUTS)/integration/cocotb/$*/results.xml
+
 $(MODULE_COCOTB_TARGETS): cocotb_tb_%:
 	$(MAKE) --no-print-directory FLOW=cocotb MODULE_NAME=$* sim
 	test -f $(SIM_OUTPUTS)/modules/cocotb/$*/results.xml
@@ -57,6 +85,19 @@ COCOTB_TEST_MODULES = test_$(MODULE_NAME)
 COCOTB_RESULTS_FILE = $(SIM_BUILD)/results.xml
 COMPILE_ARGS += -DTB_DUMPFILE=\"$(SIM_BUILD)/tb.$(WAVEFORM_EXT)\"
 export PYTHONPATH := $(MODULE_DIR):$(PYTHONPATH)
+
+else ifneq ($(INTEGRATION_NAME),)
+
+# An integration cocotb run: the testbench is the top level and the modules it
+# uses come from the library directories.
+SIM_BUILD = $(SIM_OUTPUTS)/integration/cocotb/$(INTEGRATION_NAME)
+VERILOG_SOURCES = $(INT_DIR)/tb_$(INTEGRATION_NAME).sv
+TOPLEVEL = tb_$(INTEGRATION_NAME)
+COCOTB_TEST_MODULES = test_$(INTEGRATION_NAME)
+COCOTB_RESULTS_FILE = $(SIM_BUILD)/results.xml
+COMPILE_ARGS += $(RTL_LIB_ARGS)
+COMPILE_ARGS += -DTB_DUMPFILE=\"$(SIM_BUILD)/tb.$(WAVEFORM_EXT)\"
+export PYTHONPATH := $(INT_DIR):$(PYTHONPATH)
 
 else
 
@@ -107,7 +148,7 @@ ifeq ($(FLOW),sv)
 SV_BUILD = $(SIM_BUILD)
 SV_EXE = $(SV_BUILD)/sim.$(WAVEFORM_EXT).vvp
 
-all: $(MODULE_SIM_TARGETS) $(SV_EXE)
+all: $(MODULE_SIM_TARGETS) $(INT_SIM_TARGETS) $(SV_EXE)
 	vvp $(SV_EXE) $(FST)
 
 $(SV_EXE): $(VERILOG_SOURCES)
@@ -116,18 +157,18 @@ $(SV_EXE): $(VERILOG_SOURCES)
 
 else ifeq ($(FLOW),cocotb)
 
-ifeq ($(MODULE_NAME),)
-all: $(MODULE_COCOTB_TARGETS) sim
+ifeq ($(MODULE_NAME)$(INTEGRATION_NAME),)
+all: $(MODULE_COCOTB_TARGETS) $(INT_COCOTB_TARGETS) sim
 else
 all: sim
 endif
 
 # include cocotb's make rules to take care of the simulator setup
-# Direct sim_tb_* targets need only Icarus, so skip cocotb when those are
-# the only requested goals.
+# Direct sim_tb_* and sim_int_* targets need only Icarus, so skip cocotb when
+# those are the only requested goals.
 ifeq ($(strip $(MAKECMDGOALS)),)
 include $(shell cocotb-config --makefiles)/Makefile.sim
-else ifneq ($(filter-out sim_tb_%,$(MAKECMDGOALS)),)
+else ifneq ($(filter-out sim_tb_% sim_int_%,$(MAKECMDGOALS)),)
 include $(shell cocotb-config --makefiles)/Makefile.sim
 endif
 
