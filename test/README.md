@@ -42,6 +42,27 @@ make cocotb_tb_fifo
 
 Each module cocotb run uses its matching `tb_<name>.sv`, `src/modules/<name>.sv`, and `test_<name>.py`. Its build, waveform, and results are under `../sim_outputs/modules/cocotb/<name>/`. `make FLOW=cocotb` runs all discovered module cocotb tests alongside the top level cocotb test.
 
+## Integration simulations
+
+Integration tests wire several modules together with glue logic. Put glue RTL
+in `src/integration/` and the testbench at `test/integration/tb_<name>.sv`.
+For a test named `spi_fifo`, run:
+
+```sh
+make sim_int_spi_fifo
+```
+
+Only the testbench is passed to Icarus. `src/modules/` and `src/integration/`
+are library directories (`-y`), so any module instantiated from either one is
+found automatically, provided its file is named `<module>.sv`. They are also on
+the include path. The build recompiles when the testbench or any file in those
+two directories changes. Outputs go to `../sim_outputs/integration/sv/`.
+
+For a cocotb integration test, add `test/integration/test_<name>.py` and run
+`make cocotb_int_<name>`. Results are under
+`../sim_outputs/integration/cocotb/<name>/`. Both `make` and `make FLOW=cocotb`
+run every discovered integration test.
+
 ## IHP 1P 64x16 SRAM
 
 Instantiate `RM_IHPSG13_1P_64x16_c2` using the port names in

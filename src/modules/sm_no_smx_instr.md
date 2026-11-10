@@ -1,6 +1,9 @@
 # sm_no_smx_instr.sv: how the simplified PIO state machine works
 
-`sm_no_smx_instr.sv` is one PIO state machine, modelled on chapter 3 of the RP2040 datasheet. It is a simplified version of `sm.sv`: **instructions only ever come from instruction memory**. There is no SMx_INSTR port for host-forced instructions, and OUT EXEC / MOV EXEC are not supported (see section 11). It decodes a 16-bit instruction and decides whether that instruction can finish this cycle. It then drives the blocks that do the work:
+`sm_no_smx_instr.sv` is one PIO state machine, modelled on chapter 3 of the RP2040 datasheet. It is a simplified version of `sm.sv`: 
+**instructions only ever come from instruction memory**. There is no SMx_INSTR port for host-forced instructions, 
+and OUT EXEC / MOV EXEC are not supported (see section 11). It decodes a 16-bit instruction and decides whether that 
+instruction can finish this cycle. It then drives the blocks that do the work:
 
 | Instance | Module | Job |
 |---|---|---|
@@ -10,7 +13,8 @@
 | `u_isr` | `isr.sv` | Input shift register (IN, PUSH, autopush) |
 | `u_osr` | `osr.sv` | Output shift register (OUT, PULL, autopull) |
 
-Everything shared between state machines stays **outside** `sm_no_smx_instr.sv` and connects through ports. That covers the instruction memory, the TX/RX FIFOs, the GPIO output registers and the IRQ flags.
+Everything shared between state machines stays **outside** `sm_no_smx_instr.sv` and connects through ports. 
+That covers the instruction memory, the TX/RX FIFOs, the GPIO output registers and the IRQ flags.
 
 ```
  host regs ──► ┌────────────── sm_no_smx_instr ─────────────┐ ◄─► TX / RX FIFO
@@ -50,17 +54,22 @@ Small functions used throughout:
 
 ## 3. Configuration fields
 
-These are plain `assign`s that slice the config registers into named fields (`wrap_top`, `pull_thresh`, `out_base`, ...). The thresholds go through `count32`, so `pull_thresh` / `push_thresh` are 6-bit values in the range 1..32. The counts are clamped: SET and side-set to at most 5, OUT to at most 32.
+These are plain `assign`s that slice the config registers into named fields (`wrap_top`, `pull_thresh`, `out_base`, ...). The thresholds go through `count32`, 
+so `pull_thresh` / `push_thresh` are 6-bit values in the range 1..32. The counts are clamped: SET and side-set to at most 5, OUT to at most 32.
 
 ## 4. Submodules
 
 **decode**: purely combinational. Section 6 describes it.
 
-**clockdiv**: `tick` is high for one cycle every `INT + FRAC/256` cycles on average. The SM only runs program instructions when `ce = en & tick`. The clock itself is never divided. `clkdiv_restart` resets the divider so it ticks on the next cycle.
+**clockdiv**: `tick` is high for one cycle every `INT + FRAC/256` cycles on average. The SM only runs program instructions when `ce = en & tick`. 
+                The clock itself is never divided. `clkdiv_restart` resets the divider so it ticks on the next cycle.
 
-**regfile (X, Y)**: instantiated with `NUMREGS = 3`, and register 0 is the hardwired zero. The two read ports are tied permanently to X (`src_reg_1 = 1`) and Y (`src_reg_2 = 2`). JMP X!=Y needs both at once, so `x` and `y` are always available. One write port (`xy_we`, `xy_addr`, `xy_wdata`) is enough, because no instruction writes both. **The regfile writes on the falling clock edge**; see section 7 for why this matters.
+**regfile (X, Y)**: instantiated with `NUMREGS = 3`, and register 0 is the hardwired zero. The two read ports are tied permanently to X (`src_reg_1 = 1`) and Y (`src_reg_2 = 2`). 
+                    JMP X!=Y needs both at once, so `x` and `y` are always available. One write port (`xy_we`, `xy_addr`, `xy_wdata`) is enough, because no instruction writes both. 
+**The regfile writes on the falling clock edge**; see section 7 for why this matters.
 
-**isr**: `n` is the instruction's bit-count field (`arg2`), and `dir` is IN_SHIFTDIR. `ce` is tied to 1 because the SM gates the `load`/`shift` strobes itself. The isr's synchronous `rst` is driven by `rst | restart | isr_clear`. That reset is also how PUSH and autopush clear the ISR (section 8).
+**isr**: `n` is the instruction's bit-count field (`arg2`), and `dir` is IN_SHIFTDIR. `ce` is tied to 1 because the SM gates the `load`/`shift` strobes itself. 
+        The isr's synchronous `rst` is driven by `rst | restart | isr_clear`. That reset is also how PUSH and autopush clear the ISR (section 8).
 
 **osr**: `n` = `arg2`, `dir` = OUT_SHIFTDIR. `shifted` (the bits leaving, right-aligned) is called `out_data` in the SM. That is what OUT writes to its destination.
 
@@ -81,7 +90,8 @@ There is only one instruction source: `instr` from instruction memory, fed strai
 assign done = active && !stall;
 ```
 
-Almost every side effect (register writes, shifts, pin writes, FIFO pushes) is gated by `done`. A stalled instruction does nothing except side-set, and it runs again on the next enabled cycle because the PC holds.
+Almost every side effect (register writes, shifts, pin writes, FIFO pushes) is gated by `done`. A stalled instruction does nothing except side-set, 
+and it runs again on the next enabled cycle because the PC holds.
 
 ## 6. Decode (`decode.sv`)
 
