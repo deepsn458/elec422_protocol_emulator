@@ -1,6 +1,6 @@
-# tb_sm_uart.sv: UART test for the simplified state machine
+# tb_sm_uart.sv: full-duplex UART on one state machine
 
-`tb_sm_uart.sv` checks that `src/modules/sm_no_smx_instr.sv`, built with `DATA_WIDTH = 8`, works as a real UART. It runs the UART transmit and receive programs from the RP2040 datasheet on two state machines, and checks the waveforms on the pins and the bytes in the FIFOs.
+`tb_sm_uart.sv` runs a UART on **one** `sm_no_smx_instr` (`DATA_WIDTH = 8`). The same state machine transmits on GPIO 6 and receives on GPIO 2 **at the same time** (full duplex). The testbench checks the TX waveform bit by bit, and the bytes that come out of the RX FIFO.
 
 Run it from `test/`:
 
@@ -8,7 +8,7 @@ Run it from `test/`:
 make sim_tb_sm_uart
 ```
 
-It prints `SM UART SystemVerilog test passed`, or stops at the first failing check with a message naming what failed, the value it got and the value it expected. The waveform is written to `sim_outputs/modules/sv/sm_uart.fst`.
+It prints `SM UART SystemVerilog test passed`, or stops at the first failing check, naming what failed with the value it got and the value it expected. The waveform is written to `sim_outputs/modules/sv/sm_uart.fst`.
 
 Icarus prints a few `sorry: constant selects in always_* processes` notices for `sm_no_smx_instr.sv`. They are harmless.
 
@@ -17,590 +17,496 @@ Icarus prints a few `sorry: constant selects in always_* processes` notices for 
 ## 1. Setup
 
 ```
-                +--------------+
-  host -------> |   TX FIFO    |
-                +--------------+
-                        |
-                        v
-                +--------------+  GPIO 6
-                | tx_sm (SM 0) |------------> tx_line
-                |   uart_tx    |                 |
-                +--------------+                 | loopback = 1
-                                                 v
-                                            +---------+
-         drv_line (testbench) ------------> |   mux   |
-                         loopback = 0       +---------+
-                                                 |
-                                                 | rx_line, GPIO 2
-                +--------------+                 |
-                | rx_sm (SM 1) | <---------------+
-                |   uart_rx    | ----> IRQ flag 5 (framing error)
-                +--------------+
-                        |
-                        v
-                +--------------+
-  host <------- |   RX FIFO    |
-                +--------------+
+ tx_put()  (host writes a pre-framed byte as 4 FIFO words)
+    |
+    v
++---------+  tx_data, tx_empty, tx_level   +-------------------+
+| TX FIFO | -----------------------------> |        dut        | <-- clk, rst, en
+| 4 deep  | <----------------------------- |  sm_no_smx_instr  |
++---------+  tx_pop                        |  SM_ID = 0        |
+                                           |  DATA_WIDTH = 8   |
++---------+  instr                         |                   |
+|  imem   | -----------------------------> |                   |
+| 64 x 16 | <----------------------------- |                   |
++---------+  mem_addr (pc)                 |                   |
+                                           |                   |   pins_we/wdata, dirs_we/wdata
++---------+  rx_data, rx_push              |                   | ------------------+
+| RX FIFO | <----------------------------- |                   |                   |
+| 4 deep  | -----------------------------> |                   | <-- gpio_in --+   |
++---------+  rx_full, rx_level             +-------------------+               |   v
+    |                                          |     ^                    +-------------+
+    |  host_rx_re                    irq_set   |     | irq_flags          | GPIO models |
+    v                                          v     |                    +-------------+
+ rx_get()                                   +-----------+                   |         ^
+                     host_irq_clr --------> | irq_flags |                   | GPIO 6  | GPIO 2
+                                            +-----------+           tx_line |         | rx_line
+                                                                            v         |
+                                                       loopback = 1:  tx_line ---> mux
+                                                       loopback = 0:  drv_line --> mux
 ```
 
 | Item | Value | Why |
 |---|---|---|
-| `DATA_WIDTH` | 8 | X, Y, ISR, OSR, FIFO words and GPIOs are all 8 bits |
-| TX pin (`TXP`) | GPIO 6 | Not GPIO 0, so the pin mapping is actually exercised |
-| RX pin (`RXP`) | GPIO 2 | |
-| `tx_sm` | `SM_ID = 0` | |
-| `rx_sm` | `SM_ID = 1` | `irq 4 rel` on SM 1 sets flag 4 + 1 = **5** |
-| Bit time | 8 SM cycles | Both programs spend 8 instructions/delay cycles per bit |
-| Clock divisor | shared `clkdiv` | Both SMs tick together. Bit time in clocks = 8 × divisor |
+| `DATA_WIDTH` | 8 | X, Y, ISR, OSR, FIFO words and the GPIO bus are 8 bits. A pre-framed byte takes 4 TX FIFO words (section 2) |
+| TX pin (`TXP`) | GPIO 6 | `SET_BASE`, `OUT_BASE` |
+| RX pin (`RXP`) | GPIO 2 | `IN_BASE`, `JMP_PIN` |
+| `SM_ID` | 0 | `irq 4 rel` sets flag 4 |
+| Bit time | 12 SM cycles | 3 slots of 4 cycles |
+| Clock divisor | `clkdiv` | Bit time in clocks = 12 × divisor |
 
-### What the testbench instantiates
+### Memory and boot
 
-Only `tx_sm` and `rx_sm` are real module instances, both of `sm_no_smx_instr`. Every other box is a small model written directly inside `tb_sm_uart.sv`. The arrows are the signals connected to each SM's ports.
+`imem` holds the program at 0–31 and the config at 32–39 (CLKDIV, EXECCTRL, SHIFTCTRL, PINCTRL, low half first). After `rst` falls, the SM reads 32–39 into its config registers in 8 cycles, then starts at address 0. `reset_all` writes everything and waits out the boot.
 
-```
- tx_put()
-    |  host_tx_we, host_tx_wdata
-    v
-+---------+  tx_data, tx_empty, tx_level   +-------------------+
-| TX FIFO | -----------------------------> |       tx_sm       | <-- clk, rst, en_tx, clkdiv
-| 4 deep  | <----------------------------- |  sm_no_smx_instr  | <-- tx_execctrl, tx_shiftctrl,
-+---------+  tx_pop                        |  SM_ID = 0        |     tx_pinctrl
-                                           |  DATA_WIDTH = 8   |
-+---------+  instr                         |                   |
-| tx_imem | -----------------------------> |                   |
-| 32 x 16 | <----------------------------- |                   |
-+---------+  mem_addr (tx_pc)              +-------------------+
-                                                |         ^
-              pins_we/wdata, dirs_we/wdata,     |         |  gpio_in,
-              irq_set, irq_clr                  |         |  irq_flags
-                                                v         |
-                                           +-------------------+
-                                           |   Shared models   |  tx_line (GPIO 6)
-host_irq_clr ----------------------------> |  gpio_out         | -------------------+
-                                           |  gpio_oe          |                    | loopback = 1
-                                           |  irq_flags        |  rx_line (GPIO 2)  v
-                                           |  pad logic        | <---------------- mux <-- drv_line
-                                           +-------------------+                     (loopback = 0)
-                                                ^         |
-              pins_we/wdata, dirs_we/wdata,     |         |  gpio_in,
-              irq_set, irq_clr                  |         |  irq_flags
-                                                |         v
-+---------+  instr                         +-------------------+
-| rx_imem | -----------------------------> |       rx_sm       | <-- clk, rst, en_rx, clkdiv
-| 32 x 16 | <----------------------------- |  sm_no_smx_instr  | <-- rx_execctrl, rx_shiftctrl,
-+---------+  mem_addr (rx_pc)              |  SM_ID = 1        |     rx_pinctrl
-                                           |  DATA_WIDTH = 8   |
-+---------+  rx_data, rx_push              |                   |
-| RX FIFO | <----------------------------- |                   |
-| 4 deep  | -----------------------------> |                   |
-+---------+  rx_full, rx_level             +-------------------+
-    |
-    |  host_rx_re
-    v
- rx_get()
-```
+| Config | Value |
+|---|---|
+| PINCTRL | `SET_COUNT = 1`, `SET_BASE = 6`, `OUT_COUNT = 1`, `OUT_BASE = 6`, `IN_BASE = 2`, no side-set |
+| EXECCTRL | `JMP_PIN = 2`, wrap 28 → 26 |
+| SHIFTCTRL | `PULL_THRESH = 8`, `PUSH_THRESH = 8`, OUT and IN shift right, no autopull/autopush |
 
-Each SM only uses one side of the FIFO ports. `tx_sm`'s RX FIFO inputs and `rx_sm`'s TX FIFO inputs are tied off, so they are not drawn. `restart` and `clkdiv_restart` are tied to 0 on both.
+### Pins and roles
 
-### Why each SM has its own instruction memory
-
-`sm_no_smx_instr` has no forced-instruction port, so nothing outside can set the PC. After reset every SM starts at address 0. If both SMs shared one memory, both would run the same program. The testbench gives each SM its own 32-word memory (`tx_imem`, `rx_imem`). The real top level needs the same thing, or a per-SM start address.
-
-### Pins
-
-- Each SM's `pins_we`/`dirs_we` masks update shared `gpio_out` / `gpio_oe` registers.
-- A pin that nothing drives reads **high**, like a UART line with a pull-up. So the RX side sees an idle line before the TX side has set its pin direction.
-- `tx_line` is the TX pin: `gpio_out[TXP]` once it is an output, otherwise high.
-- `rx_line` is the RX pin: `tx_line` when `loopback = 1`, otherwise `drv_line`, which the testbench drives.
+- A pin nothing drives reads **high**, like a UART line with a pull-up.
+- `tx_line` is GPIO 6. `rx_line` is GPIO 2: `tx_line` when `loopback = 1`, otherwise `drv_line`.
 - The testbench plays two roles, and they never mix:
   - As the **host**, it only touches the FIFOs and IRQ flags (`tx_put`, `rx_get`, `host_irq_clr`).
-  - As the **external device** on the other end of the UART wire, it only touches `drv_line` (through `drive_frame`).
-
-  On a real chip, GPIO 2 would be wired to another device's TX pin; `drv_line` stands in for that pin. With `loopback = 1`, our own TX SM plays the external device instead.
+  - As the **external device** on the other end of the wire, it only touches `drv_line` (`drive_frame`) and watches `tx_line` (`uart_frame`).
 
 ---
 
-## 2. The programs
+## 2. How one SM does both directions
 
-### Reading a PIO instruction
+### Why not just "out, then in" every bit
 
-Every instruction has the same shape:
+A loop like `out pins, 1 [d]` / `in pins, 1 [d]` puts the RX samples at fixed points on the **TX** bit grid. That only works if the other device's bits happen to line up with ours. A real device can start its frame at any moment, so a fixed sample point can land right on a bit edge and read garbage. RX has to line up with **its own** start bit, while TX keeps its own steady timing. One program has to do both.
 
-```
-opcode  destination/source/condition, value/count/address  side S  [D]
-```
+### Slots
 
-| Part | Meaning |
-|---|---|
-| `opcode` | What to do: `set`, `pull`, `out`, `in`, `jmp`, `wait`, `irq`, `push`, ... |
-| First argument | **Where** it acts: a destination (`set pindirs`), a source (`in pins`), or a jump condition (`jmp x--`) |
-| Second argument | **How much / which**: a constant (`set x, 7`), a bit count (`out pins, 1`), or a jump target address |
-| `side S` | Optional. While this instruction runs, also drive the side-set pins to `S` |
-| `[D]` | Optional. After the instruction finishes, wait `D` extra cycles before the next one |
-| Labels (`bitloop:`) | Names for addresses, so jumps can say `jmp bitloop` instead of `jmp 2` |
-
-The 16-bit hex splits the same way:
+Each UART bit is split into **3 slots of 4 cycles**. Every slot starts with the same two TX instructions, and the rest of the slot is one RX step:
 
 ```
- 15  13 12        8 7      5 4        0
-[opcode][side + delay][dest/src][value/count]
+cycle:   0                       1              2              3
+       | pull ifempty noblock  | out pins, 1  | RX step      | (RX step or delay) |
+         TX: next word if used   TX: 1/3 bit    poll / sample / count / check
 ```
 
-The 5-bit `side + delay` field is shared. In `uart_tx`, side-set is 1 bit and optional, so the field is `[enable][side value][3 delay bits]`: the enable says whether this instruction side-sets at all, and delays can be at most 7. `uart_rx` uses no side-set, so all 5 bits are delay (up to 31).
+Because **every** slot does identical TX work, the RX code can begin a frame in any slot, and TX timing is unaffected. RX lines up to its start bit to within one slot.
 
-**Timing:** every instruction takes 1 cycle plus its delay, unless it stalls (a `wait` whose condition isn't true yet, a `pull` on an empty FIFO, a `push` on a full one). One UART bit is 8 cycles, so each program is arranged so that exactly 8 cycles pass per bit.
+### What that costs: pre-framed TX words
 
-### uart_tx (on `tx_sm`)
+`out pins, 1` runs every slot, so it sends **one third of a bit** each time. The host therefore pre-frames each byte: start bit, 8 data bits (LSB first), stop bit, **each repeated 3 times** = 30 bits, padded with two 1s to 32 (`frame_word`). That 32-bit value goes into the 8-bit TX FIFO as **4 words, low byte first**.
 
-The datasheet program with one instruction added in front. Without forced instructions, the host can't run `set pindirs` for it, so the program sets its own pin direction. The wrap goes back to address 1, so that first instruction only runs once.
+```
+frame_word(0x96), bit 31 on the left:
+  11  111  111  000  000  111  000  111  111  000  000
+  --  stop  d7   d6   d5   d4   d3   d2   d1   d0  start
+padding
+  |------ word 3 ------|----- word 2 -----|---- word 1 ----|-- word 0 --|
+  (word boundaries every 8 bits from the right; word 0 is written first)
+```
 
-| Addr | Assembly | Hex | Summary |
+- `PULL_THRESH = 8`, so `pull ifempty` fetches the next word after 8 `out`s. Four words make one frame plus 2 padding slots, so back-to-back frames are separated by 2/3 of a bit of extra idle (a slightly long stop bit, which any UART accepts).
+- **The host must write all 4 words of a frame together, and only into an empty FIFO** (`tx_put` does this). The FIFO is 4 deep, so a whole frame is queued before the SM needs its second word. If the host wrote only part of a frame, `pull noblock` would find the FIFO empty mid-frame and send 8 idle bits in the middle of the frame.
+- The host can queue the next frame as soon as the FIFO is empty, which happens when the SM pulls word 3. Word 3 still has 8 slots (2.7 bits) to send, so the host has that long to write the next 4 words and keep frames back to back.
+- If the TX FIFO is empty, `pull noblock` copies **X** into the OSR instead. X holds all ones (`mov x, ~null`), so the line sends 10 idle-high bits, then checks the FIFO again.
+- Everything else is 8-bit friendly: RX receives 8 bits into an 8-bit ISR (`PUSH_THRESH = 8`), `set y, 7` counts bits, and `mov x, ~null` gives `0xFF`.
+
+### RX timing
+
+The idle loop checks the RX line once per slot. When it sees a start bit, the edge happened sometime in the last 4 cycles. RX then samples:
+
+| Sample | When (after the slot that saw the start) | Where in the bit |
+|---|---|---|
+| Data bit 0 | 4 slots = 16 cycles | 33%–67% of the way through |
+| Data bits 1–7 | every 3 slots = 12 cycles after that | same |
+| Stop bit | 3 slots after bit 7 | same |
+
+So every sample lands in the middle third of its bit, whatever the phase of the incoming frame. Test 3 drives a frame at every possible cycle offset to prove it.
+
+### Nothing blocks
+
+A stalled instruction would freeze **both** directions, so every instruction is non-blocking: `pull ... noblock` and `push ... noblock`. The testbench counts stall cycles and requires 0 in every test.
+
+---
+
+## 3. The program
+
+29 instructions. "P" is `pull ifempty noblock` and "O" is `out pins, 1`, the TX pair at the start of every slot.
+
+| Addr | Instruction | Hex | Part |
 |---|---|---|---|
-| 0 | `set pindirs, 1 side 1` | `F881` | Make the TX pin an output and drive it high. Runs once |
-| 1 | `pull side 1 [7]` | `9FA0` | Get the next byte. The line is high: **stop bit**, or idle while waiting |
-| 2 | `set x, 7 side 0 [7]` | `F727` | Start the bit counter. The line is low: **start bit** |
-| 3 | `out pins, 1` | `6001` | Send one data bit |
-| 4 | `jmp x-- 3 [6]` | `0643` | Repeat for 8 bits |
+| 0 | `set pins, 1` | E001 | Init: line high... |
+| 1 | `set pindirs, 1` | E081 | ...then make it an output (no glitch) |
+| 2 | `mov x, ~null` | A02B | X = all ones, the idle word |
+| 3 | `push iffull noblock` | 8040 | Good frame: push the byte |
+| 4 | P | 80C0 | **Idle slot** |
+| 5 | O | 6001 | |
+| 6 | `jmp pin 4 [1]` | 01C4 | Line high: stay idle. Low: start bit |
+| 7 | P | 80C0 | **Filler slot** |
+| 8 | O | 6001 | |
+| 9 | `set y, 7 [1]` | E147 | Bit counter |
+| 10 | P | 80C0 | **Bit loop**, slot 1 |
+| 11 | `out pins, 1 [2]` | 6201 | |
+| 12 | P | 80C0 | Slot 2 |
+| 13 | `out pins, 1 [2]` | 6201 | |
+| 14 | P | 80C0 | Slot 3 |
+| 15 | O | 6001 | |
+| 16 | `in pins, 1` | 4001 | Sample the bit |
+| 17 | `jmp y-- 10` | 008A | 8 data bits |
+| 18–21 | P, `out [2]`, P, `out [2]` | | **Stop bit**, slots 1–2 |
+| 22 | P | 80C0 | Slot 3 |
+| 23 | O | 6001 | |
+| 24 | `jmp pin 3` | 00C3 | Stop bit high: go push |
+| 25 | `irq 4 rel` | C014 | Stop bit low: framing error |
+| 26 | P | 80C0 | **Wait-high slot** (wrap bottom) |
+| 27 | O | 6001 | |
+| 28 | `jmp pin 4 [1]` | 01C4 | High: back to idle. Low: wrap to 26 (wrap top) |
 
-Config: side-set 1 bit, optional (`SIDESET_COUNT = 2`, `SIDE_EN = 1`); OUT, SET and side-set all start at GPIO 6; OUT shifts right (LSB first); wrap 4 → 1.
+### Init (0–3)
 
-**0. `set pindirs, 1 side 1`**
-- `set`: write a small constant (0–31) that is stored in the instruction itself.
-- `pindirs`: the destination is the **direction** of the pins in the SET range. `SET_BASE = 6` and `SET_COUNT = 1`, so only GPIO 6.
-- `1`: the constant. A direction of 1 means output.
-- `side 1`: at the same time, drive the side-set pin (also GPIO 6) to 1, so the line goes high as soon as it becomes an output.
-- Result: the TX line is an output and idles high. Afterwards the wrap never comes back here.
+- `set pins, 1` then `set pindirs, 1`: drive the TX pin high **before** making it an output, so the remote device never sees a false start bit.
+- `mov x, ~null`: `mov` copies a source into a destination. Destination `x`, source `null` (all zeros), operation `~` (invert), so X = all ones. `pull noblock` copies X when the FIFO is empty, which makes the line idle high.
+- Address 3 (`push iffull noblock`) is also where a good frame ends up. At init the ISR is empty, so `iffull` makes it do nothing, and execution falls into the idle slot.
 
-**1. `pull side 1 [7]`**
-- `pull`: move the next word from the TX FIFO into the OSR (the output shift register). With no options it is `pull block`: if the FIFO is empty, the SM **stalls** here until the host writes a byte.
-- `side 1`: drive the line high. Side-set happens even while stalled, so the line stays high the whole time it waits. That is the UART idle level.
-- `[7]`: after the pull succeeds, wait 7 more cycles while still driving `side 1`. The line is high for 1 + 7 = 8 cycles.
-- Why 8 cycles matters: UART has no clock wire, so each bit is sent by holding the line at a level for a fixed time, the **bit time**. This program uses 8 SM cycles per bit. Holding the line high for 8 cycles is therefore exactly one **stop bit**. The loop comes back to this instruction right after the last data bit, so this is the stop bit of the byte just sent. Before the very first byte it is just extra idle time, which is also high and therefore harmless. If the FIFO is empty, the stall keeps the line high even longer, and the receiver sees that as idle.
+### Idle slot (4–6)
 
-**2. `set x, 7 side 0 [7]`**
-- `set`: write a constant.
-- `x`: the destination is scratch register X, used as the bit counter.
-- `7`: X = 7. The loop below runs while X counts 7, 6, ..., 0, which is 8 times, once per data bit.
-- `side 0`: drive the line low: the **start bit**.
-- `[7]`: 1 + 7 = 8 cycles, so the start bit lasts exactly one bit time.
+- `pull ifempty noblock`: `ifempty` means only pull when the OSR has used up `PULL_THRESH = 8` bits; otherwise it does nothing. `noblock` means that if the TX FIFO is empty it copies X instead of stalling.
+- `out pins, 1`: shift 1 bit out of the OSR onto the OUT pins (GPIO 6).
+- `jmp pin 4 [1]`: `pin` jumps if the `JMP_PIN` (GPIO 2) is **high**. High means no start bit, so loop back to 4. Low falls through to the filler slot. `[1]` pads the slot to 4 cycles. The delay applies whether or not the jump is taken, so both paths take the same time.
 
-**3. `out pins, 1`**
-- `out`: shift bits out of the OSR and send them somewhere.
-- `pins`: the destination is the pin **values** in the OUT range. `OUT_BASE = 6` and `OUT_COUNT = 1`, so GPIO 6.
-- `1`: the bit count: one bit per `out`. The OSR shifts right, so the byte goes out least-significant bit first, as UART requires.
-- No `side`: the side-set enable bit is 0, so side-set leaves the pin alone and the `out` value is what appears.
+### Filler slot (7–9)
 
-**4. `jmp x-- 3 [6]`** (written `jmp x-- bitloop [6]` in the datasheet, where `bitloop` is address 3)
-- `jmp`: go to another address if the condition is true; otherwise continue to the next instruction.
-- `x--`: the condition is "X is not zero", tested **before** X is decremented. X is decremented either way.
-- `3`: the target address, the `out` above.
-- `[6]`: wait 6 more cycles. With the `out` (1 cycle) and the `jmp` itself (1 cycle), each data bit lasts 1 + 1 + 6 = 8 cycles.
-- Result: after the 8th bit X was 0, so the jump falls through. Address 4 is `WRAP_TOP`, so the PC wraps to address 1: `pull` drives the stop bit and fetches the next byte.
+One slot between seeing the start bit and the bit loop, so that the first sample lands 4 slots later. `set y, 7` loads the bit counter: `jmp y--` jumps while Y is nonzero (before decrementing), so the loop runs 8 times.
 
-With `DATA_WIDTH = 8`, `pull` loads the whole byte into the 8-bit OSR and the eight `out pins, 1` empty it exactly.
+### Bit loop (10–17)
 
-### uart_rx (on `rx_sm`)
+Three slots per bit. Slots 1 and 2 are just TX (`out pins, 1 [2]` pads them to 4 cycles). Slot 3 does TX, then:
 
-The datasheet `uart_rx` program, with framing-error detection.
+- `in pins, 1`: shift 1 bit from the IN pins (GPIO 2) into the ISR. IN shifts right, so after 8 bits the ISR (8 bits wide) holds the byte, LSB in bit 0.
+- `jmp y-- 10`: back to slot 1 for the next bit, 8 times in total.
 
-| Addr | Label | Assembly | Hex | Summary |
-|---|---|---|---|---|
-| 0 | `start` | `wait 0 pin 0` | `2020` | Wait for the start bit |
-| 1 | | `set x, 7 [10]` | `EA27` | Start the bit counter, then move to the middle of data bit 0 |
-| 2 | `bitloop` | `in pins, 1` | `4001` | Sample one data bit |
-| 3 | | `jmp x-- bitloop [6]` | `0642` | Repeat for 8 bits |
-| 4 | | `jmp pin good_stop` | `00C8` | Check the stop bit |
-| 5 | | `irq 4 rel` | `C014` | Bad stop bit: raise the framing-error flag |
-| 6 | | `wait 1 pin 0` | `20A0` | Wait for the line to go back high |
-| 7 | | `jmp start` | `0000` | Throw the frame away and start again |
-| 8 | `good_stop` | `push` | `8020` | Good frame: send the byte to the RX FIFO |
+### Stop bit (18–25)
 
-Config: `IN_BASE = 2` and `JMP_PIN = 2`, so `pin 0` and `jmp pin` both mean GPIO 2; IN shifts right; wrap 8 → 0.
+Two TX-only slots, then in slot 3 `jmp pin 3` checks the stop bit at the same point in the bit as the data samples.
 
-**0. `wait 0 pin 0`** (label `start`)
-- `wait`: stall until a condition is true.
-- `0`: the polarity: wait for the source to be **0**.
-- `pin`: the source is an input pin, numbered relative to `IN_BASE`.
-- `0`: pin index 0, i.e. `IN_BASE + 0` = GPIO 2, the RX line.
-- Result: the SM sits here while the line is idle-high, and moves on in the first cycle the line is low: the start of the start bit.
+- **High** (good frame): jump to address 3. `push iffull noblock` pushes the ISR to the RX FIFO. `iffull` is true because the ISR has `PUSH_THRESH = 8` bits. `noblock` means that if the RX FIFO is full the byte is dropped instead of stalling, because a stall would also stop TX. Then idle.
+- **Low** (framing error): `irq 4 rel` sets IRQ flag 4 + `SM_ID` = 4. Nothing is pushed. The leftover 8 bits in the ISR are harmless: the next good frame shifts in 8 more, which push them out of the 8-bit ISR, and then pushes.
 
-**1. `set x, 7 [10]`**
-- `x`, `7`: X = 7, the bit counter (8 data bits), as in `uart_tx`.
-- `[10]`: wait 10 extra cycles. Counting the `wait` cycle (cycle 0) and this instruction (cycle 1), the first sample happens in cycle 12. That is 1.5 bit times after the falling edge: past the start bit and into the **middle** of data bit 0. Sampling mid-bit gives the most margin against small baud-rate differences.
+### Wait-high slot (26–28)
 
-**2. `in pins, 1`** (label `bitloop`)
-- `in`: shift bits from a source into the ISR (the input shift register).
-- `pins`: the source is the input pins starting at `IN_BASE` = GPIO 2.
-- `1`: the bit count: one bit per sample. The ISR shifts right, so each new bit enters at the top and moves down. After 8 samples the first bit received (the LSB) is at bit 0.
-
-**3. `jmp x-- bitloop [6]`**
-- Same as in `uart_tx`: jump back to `bitloop` (address 2) while X was not zero, decrementing X each time.
-- `[6]`: with the `in` (1) and the `jmp` (1), each sample is 8 cycles after the previous one, so every sample stays in the middle of its bit.
-- After the 8th sample it falls through, landing in the middle of the stop bit.
-
-**4. `jmp pin good_stop`**
-- `jmp`: conditional jump.
-- `pin`: the condition is the level of the GPIO selected by `JMP_PIN` (GPIO 2). This is a separate setting from `IN_BASE`; here both point at the RX line.
-- `good_stop`: the target, address 8.
-- Result: the stop bit should be 1. If it is, jump to `push`. If it is 0, fall through to the error path.
-
-**5. `irq 4 rel`**
-- `irq`: set (or clear) one of the 8 shared IRQ flags. With no `clear` or `wait` option, it sets the flag and moves on.
-- `4`: the flag index.
-- `rel`: relative: add this SM's number (`SM_ID`) to the low 2 bits of the index, modulo 4. On SM 1 that gives 4 + 1 = **flag 5**. This lets several RX SMs run the same program and still report errors on different flags.
-- Result: flag 5 tells the host there was a framing error. The host clears it by writing 1 to that bit.
-
-**6. `wait 1 pin 0`**
-- Same as address 0 but with polarity `1`: stall until GPIO 2 is **high** again.
-- Result: a long low period (a break) is treated as one error, not as many start bits.
-
-**7. `jmp start`**
-- No condition, so it always jumps to `start` (address 0). The bad byte is not pushed; the next frame's 8 `in`s replace every bit of it in the ISR.
-
-**8. `push`** (label `good_stop`)
-- `push`: send the ISR's contents to the RX FIFO and clear the ISR. With no options it is `push block`: if the RX FIFO is full, the SM **stalls** here until the host reads a byte.
-- Result: the received byte is in the RX FIFO. Address 8 is `WRAP_TOP`, so the PC wraps to address 0 to wait for the next start bit.
-
-With `DATA_WIDTH = 8`, the eight `in pins, 1` fill the 8-bit ISR exactly, so the received byte is already right-aligned when it is pushed. (On a 32-bit RP2040 it would land in the top byte.)
+After a framing error the line may stay low (a break). Going straight back to idle would see "start bits" over and over. This slot checks for the line going high: `jmp pin 4` goes back to idle when it is high, and the wrap (28 → 26) loops here while it is low, at no cost. TX keeps running the whole time.
 
 ---
 
-## 3. Testbench pieces
+## 4. Testbench pieces
 
 ### Models
 
-| Model | What it is |
+| Model | What it does |
 |---|---|
-| `tx_imem`, `rx_imem` | 32 × 16-bit instruction memories, combinational read |
-| TX FIFO | 4 deep, first-word fall-through, feeds `tx_sm`. The host writes with `tx_put()` |
-| RX FIFO | 4 deep, filled by `rx_sm`. The host reads with `rx_get()` |
-| IRQ flags | 8 flags, set and cleared by both SMs; the host clears with `host_irq_clr` (write 1 to clear) |
-| GPIO | Shared `gpio_out` / `gpio_oe`, pull-up on undriven pins, loopback or driven RX line |
-
-The unused FIFO side of each SM is tied off: `tx_sm` never sees a full RX FIFO, and `rx_sm` always sees an empty TX FIFO.
+| `imem` | 64 × 16-bit instruction memory, combinational read: `instr = imem[pc]` |
+| TX FIFO | 4 deep, first-word fall-through, written by `tx_put()` |
+| RX FIFO | 4 deep, read by `rx_get()` |
+| IRQ flags | 8 flags, set by the SM, cleared by the SM or the host (write 1 to clear) |
+| `gpio_out` / `gpio_oe` | Pin levels and directions, updated from the SM's write masks |
+| `stalls` | Counts cycles where an instruction was stalled; must stay 0 |
+| `both_low` | Counts cycles where `tx_line` and `drv_line` are both low, proof that TX and RX frames overlapped |
 
 ### Helpers
 
 | Task / function | What it does |
 |---|---|
-| `tx_prog(a)`, `rx_prog(a)` | Return the instruction at address `a` of each program, built with the instruction encoders |
-| `reset_all(div)` | Reset everything, load both programs and configs, set the divisor. `div` is 16.8 fixed point: `24'h0100` = 1, `24'h0280` = 2.5. Both SMs are left disabled |
-| `start()` | Enable both SMs |
-| `tx_put(b)` | Host writes a byte to the TX FIFO, waiting while it is full |
-| `rx_get(b, max)` | Host reads a byte from the RX FIFO, waiting up to `max` cycles for one |
-| `uart_frame(bit_cycles, data, idle)` | Watches the TX line: waits for a start bit, checks every bit lasts exactly `bit_cycles`, checks start = 0 and stop = 1, returns the byte and the number of idle cycles before the start bit |
-| `drive_frame(data, bit_cycles, stop)` | Drives one frame on the RX line from the testbench. `stop = 0` makes a bad stop bit. The line stays at the stop level afterwards |
+| `prog(a)` / `prog_hex(a)` | The program built with encoders, and the same program hand-assembled |
+| `frame_word(b)` | The host's 32-bit pre-framed value for byte `b` (30 frame bits + 2 padding) |
+| `reset_all(div)` | Reset, load program and config into `imem`, boot. `div` is 16.8 fixed point: `24'h0100` = 1, `24'h0280` = 2.5. SM left disabled |
+| `tx_put(b)` | Waits until the TX FIFO is empty, then writes the 4 bytes of `frame_word(b)` on 4 consecutive cycles |
+| `rx_get(b, max)` | Host reads a word (the received byte) from the RX FIFO, waiting up to `max` cycles |
+| `uart_frame(bit_cycles, data, idle)` | External device watches `tx_line`: waits for a start bit, checks every bit lasts exactly `bit_cycles`, start = 0 and stop = 1, returns the byte and the idle cycles before it |
+| `drive_frame(data, bit_cycles, stop)` | External device sends a frame on `drv_line`. `stop = 0` makes a bad stop bit. The line stays at the stop level afterwards |
+| `in_idle(pc)`, `in_waithigh(pc)` | Is the PC in the idle slot (4–6) or the wait-high slot (26–28)? |
 | `check(got, exp, what)` | Stops the simulation with `$fatal` if `got != exp` |
 
-Inputs change and checks happen 1 ns after the rising edge, the same convention as the other state machine testbenches.
+Inputs change and checks happen 1 ns after the rising edge, the same as the other state machine testbenches.
 
-The test bytes are `55 00 FF 01 80 A5 3C C3`: alternating bits, all zeros, all ones, and a single 1 at each end, so a wrong shift direction or a dropped end bit shows up.
+Test bytes: `pattern` = `55 00 FF 01 80 A5 3C C3` for TX, `other` = `96 69 F0 0F 7E 81 33 CC` for the external device. Alternating bits, all zeros, all ones and single end bits make a wrong shift direction or a dropped bit show up.
 
 ---
 
-## 4. The tests
+## 5. The tests
 
-### 1. Encoders (`test_encoders`)
+7 tests, run 13 times in total ([tb_sm_uart.sv:668](tb_sm_uart.sv)):
 
-Code: `tb_sm_uart.sv` lines 440–453. Called at line 562.
+| Test | Runs |
+|---|---|
+| 1. Program | once |
+| 2. TX | divisors 1, 3 |
+| 3. RX at every phase | divisors 1, 3 |
+| 4. Full duplex | divisors 1, 3 |
+| 5. Loopback | divisors 1, 3, 2.5 |
+| 6. Framing error | divisors 1, 2 |
+| 7. RX FIFO full | divisor 1 |
 
-Checks that `tx_prog` and `rx_prog` produce the same hex as `pioasm` does for the datasheet programs. Without this, the other tests could pass with programs that differ from the real ones.
+### 1. Program (`test_program`)
 
-### 2. TX on its own (`test_tx`, divisors 1 and 3)
+Code: `tb_sm_uart.sv` lines 488–495.
 
-Code: `tb_sm_uart.sv` lines 458–483. Called at lines 563–564.
+Checks that the encoders in `prog()` build exactly the hand-assembled words in `prog_hex()`, and that `frame_word(0x96)` has the layout shown in section 2.
 
-```
- tx_put(pattern[i])
-    |
-    v
-+---------+         +----------------+  GPIO 6, tx_line   +--------------+
-| TX FIFO | ------> |     tx_sm      | -----------------> | uart_frame() |
-+---------+         |   en_tx = 1    |                    | decodes byte |
-                    +----------------+                    | times bits   |
-                       |          |                       +--------------+
-                 tx_pc |          | gpio_oe                      |
-                       v          v                              v
-            check: on PULL   check: only GPIO 6       check: byte matches,
-                             is an output             no gap between bytes
+### 2. TX (`test_tx`, divisors 1 and 3)
 
- rx_sm is off (en_rx = 0).
-```
-
-Only `tx_sm` runs. The test checks:
-
-- After the first instruction, GPIO 6 is an output and **no other pin** is.
-- The line idles high, and the SM waits on `pull` (address 1) while the TX FIFO is empty.
-- 8 bytes, sent as two groups of 4 (one full FIFO each): every frame decodes to the byte sent, and every bit lasts exactly 8 × divisor cycles.
-- Queued bytes go out back to back: the next start bit begins straight after the stop bit (`idle == 1`).
-- Afterwards the line is high again, the SM is back on `pull`, and the pin directions haven't changed.
-
-#### Line by line
-
-`check` messages are left out to keep this short. The programs are not in the task: `reset_all` loads them into the instruction memories, and the SMs run them on their own during `step`, `tx_put`, `uart_frame` and the other tasks that let clocks pass.
-
-```systemverilog
-// ---- Startup: no data sent yet ----
-reset_all(div[15:0] << 8);    // reset, load programs and config; SMs off
-en_tx = 1;                    // turn on tx_sm only
-step(1);                      // runs address 0: set pindirs, 1 side 1
-check(gpio_oe, 8'h1 << TXP);  // GPIO 6 is an output, no other pin is
-check(tx_line, 1);            // line idles high
-step(20 * div);               // SM reaches pull and stalls (FIFO empty)
-check(tx_line, 1);            // still high: no data, nothing sent
-check(tx_pc, TX_PULL);        // PC parked at address 1
-
-// ---- Send 8 bytes, as 2 groups of 4 (the FIFO holds 4) ----
-tx_put(pattern[...]);         // x4: host writes 4 bytes
-uart_frame(8 * div, b, idle); // read start + 8 data + stop off the wire,
-                              // fail if any bit isn't exactly 8 * div clocks
-check(b, pattern[...]);       // byte on the wire == byte the host wrote
-check(idle, 1);               // bytes 2-4: start bit right after the stop bit
-
-// ---- After sending: back to idle ----
-step(30 * div);               // FIFO is empty again
-check(tx_line, 1);            // line back to idle high
-check(tx_pc, TX_PULL);        // SM waiting on pull again
-check(gpio_oe, 8'h1 << TXP);  // still only GPIO 6 is an output
-```
-
-### 3. Loopback (`test_loopback`, divisors 1, 3 and 2.5)
-
-Code: `tb_sm_uart.sv` lines 489–505. Called at lines 565–567.
+Code: `tb_sm_uart.sv` lines 499–527.
 
 ```
  tx_put(pattern[i])
     |
     v
-+---------+         +----------------+
-| TX FIFO | ------> |     tx_sm      |
-+---------+         |   en_tx = 1    |
-                    +----------------+
-                            |
-                            | GPIO 6, tx_line
-                            v
-                     mux (loopback = 1)
-                            |
-                            | GPIO 2, rx_line
-                            v
-                    +----------------+
-                    |     rx_sm      | -----> irq_flags: check still 0
-                    |   en_rx = 1    | -----> rx_pc: check back at wait 0 pin 0
-                    +----------------+
-                            |
-                            v
-                       +---------+
-                       | RX FIFO | -----> rx_cnt: check 0 at the end
-                       +---------+
-                            |
-                            v
-                  rx_get(b): check b == pattern[i]
++---------+         +-------------------+  GPIO 6, tx_line   +--------------+
+| TX FIFO | ------> |        dut        | -----------------> | uart_frame() |
++---------+         | RX line held high |                    | decodes byte |
+                    +-------------------+                    | times bits   |
+                                                             +--------------+
 ```
-
-Both SMs run with the TX pin wired to the RX pin. 8 bytes go into the TX FIFO and must come out of the RX FIFO, in order and unchanged. Afterwards there must be no extra bytes, no framing-error flag, and the RX SM must be back at `wait 0 pin 0`.
-
-Divisor 2.5 checks a fractional clock divider: the SM ticks every 2 or 3 clocks, so bits are not all the same length in clocks. The RX still samples each bit in its middle because both SMs tick together.
-
-#### Line by line
 
 ```systemverilog
-// ---- Startup ----
-reset_all(div);               // reset, load programs and config; loopback = 1
-start();                      // turn on both SMs
+reset_all(div << 8);          // reset, load, boot; SM off
+loopback = 0;                 // RX line = drv_line, held high: no RX traffic
+en = 1;
+step(2 * div);                // runs set pins, set pindirs
+check(gpio_oe, 1 << TXP);     // GPIO 6 is an output, no other pin is
+check(tx_line, 1);            // idles high
+step(40 * div);
+check(tx_line, 1);            // still high: X (all ones) is being sent
 
-// ---- Send 8 bytes, as 2 groups of 4 (the FIFOs hold 4) ----
-tx_put(pattern[...]);         // x4: host writes 4 bytes
-rx_get(b, 400 * (div >> 8) + 400);  // x4: wait for a byte in the RX FIFO, read it;
-                              // fail if none arrives in time
-check(b, pattern[...]);       // byte received == byte sent
+fork                          // tx_put waits for an empty FIFO, so run host and watcher together
+  tx_put(pattern[i]);         // x8: host writes each frame as 4 words
+  uart_frame(12 * div, b, idle);// x8: decode each frame; every bit exactly 12 * div clocks
+  check(b, pattern[i]);       // byte on the wire == byte written
+  check(idle, 1 + 8 * div);   // bytes 2-8: only the 2 padding slots between frames
+join
 
-// ---- After sending: nothing left over ----
-step(40);                     // give any stray byte time to show up
-check(rx_cnt, 0);             // RX FIFO is empty: no extra bytes
-check(irq_flags, 0);          // no framing error was raised
-check(rx_pc, RX_START);       // RX is back on wait 0 pin 0, ready for a start bit
+step(30 * div);
+check(tx_line, 1);            // back to idle high
+check(rx_cnt, 0);             // RX received nothing (line was idle)
+check(irq_flags, 0);
+check(gpio_oe, 1 << TXP);     // directions unchanged
+check(stalls, 0);             // never stalled
 ```
 
-### 4. RX and framing errors (`test_rx_framing`, divisors 1 and 2)
+### 3. RX at every phase (`test_rx_phases`, divisors 1 and 3)
 
-Code: `tb_sm_uart.sv` lines 511–541. Called at lines 568–569.
+Code: `tb_sm_uart.sv` lines 531–550.
 
 ```
- drive_frame(data, bit_cycles, stop)      <- testbench as the external device
+ drive_frame(other[off % 8])   <- external device, starting `off` cycles later each time
     |
-    | drv_line
+    | drv_line -> mux (loopback = 0) -> GPIO 2
     v
- mux (loopback = 0)
++-------------------+
+|        dut        | ---> tx_line: check still idle high
++-------------------+
     |
-    | GPIO 2, rx_line
-    v
-+----------------+  irq_set, flag 5   +-----------+
-|     rx_sm      | -----------------> | irq_flags | <-- host_irq_clr (host clears flag 5)
-|   en_rx = 1    |                    +-----------+
-+----------------+                          |
-    |         |                             v
-    |         | rx_pc                 check: flag 5 set after a bad frame,
-    |         v                              clear after the host writes 1
-    |       check: at wait 1 pin 0 (6), then back at wait 0 pin 0 (0)
     v
 +---------+
-| RX FIFO | -----> rx_cnt: check 0 after a bad frame (nothing pushed)
+| RX FIFO | ---> rx_get(b): check b == other[off % 8]
 +---------+
-    |
-    v
- rx_get(b): check b == 0x96, then 0x69
-
- tx_sm is off (en_tx = 0).
 ```
 
-Only `rx_sm` runs. The testbench, acting as the external device, drives the RX line.
-
-1. A good frame (`0x96`) is received.
-2. A frame with a **low stop bit** (a break) is sent, and the line is held low:
-   - nothing is pushed to the RX FIFO;
-   - IRQ flag 5 is set (`irq 4 rel` on SM 1);
-   - the SM waits at `wait 1 pin 0` (address 6).
-3. The line goes high: the SM goes back to `wait 0 pin 0`.
-4. The host writes 1 to flag 5: the flag clears.
-5. Another good frame (`0x69`) is received correctly, with no new error.
-
-#### Line by line
-
-`bc` is one bit time in clocks: `8 * div`.
+This is the test that a fixed-grid "out then in" design would fail. One bit is `12 * div` clocks, and the test sends a frame starting at **every** clock offset within a bit, so every possible alignment between the incoming frame and the SM's slots is covered.
 
 ```systemverilog
-// ---- Startup: only RX, testbench drives the wire ----
-reset_all(div[15:0] << 8);    // reset, load programs and config; SMs off
-loopback = 0;                 // RX line now comes from drv_line
-en_rx = 1;                    // turn on rx_sm only
-step(5);                      // SM sits on wait 0 pin 0 (line is high)
+reset_all(div << 8);
+loopback = 0;                 // testbench drives the RX line
+en = 1;
+step(5);
+for (off = 0; off < 12 * div; off++) begin
+    step(off);                // shift the start time by one more clock
+    drive_frame(other[off % 8], 12 * div, 1);
+    rx_get(b, 4 * 12 * div);
+    check(b, other[off % 8]); // received correctly at this phase
+end
+check(rx_cnt, 0);             // no extra bytes
+check(irq_flags, 0);          // no framing errors
+check(tx_line, 1);            // TX stayed idle
+check(stalls, 0);
+```
 
-// ---- A good frame ----
-drive_frame(8'h96, bc, 1);    // send 0x96 on the wire, stop bit high
-rx_get(b, 4 * bc);            // read it from the RX FIFO
-check(b, 8'h96);              // received correctly
+### 4. Full duplex (`test_full_duplex`, divisors 1 and 3)
 
-// ---- A bad frame: stop bit low ----
-drive_frame(8'h00, bc, 0);    // send 0x00, stop bit low; line stays low
-step(2 * bc);                 // RX samples the stop bit and takes the error path
-check(rx_cnt, 0);             // nothing was pushed to the RX FIFO
-check(irq_flags, 8'h1 << ERR_FLAG);  // IRQ flag 5 is set (irq 4 rel on SM 1)
-check(rx_pc, 6);              // SM waits on wait 1 pin 0 for the line to go high
+Code: `tb_sm_uart.sv` lines 554–593.
 
-// ---- Recovery ----
-drv_line = 1;                 // line goes back to high
-step(bc);                     // SM leaves address 6 and jumps to 0
-check(rx_pc, RX_START);       // back on wait 0 pin 0
+```
+ host_tx: tx_put(pattern[0..7])            device_tx: drive_frame(other[0..7])
+    |                                          |  (starts 7 cycles in, extra
+    v                                          |   0..7 cycles between frames)
++---------+     +-------------------+          v
+| TX FIFO | --> |        dut        | <-- GPIO 2 (drv_line)
++---------+     +-------------------+
+                   |             |
+          GPIO 6   |             v
+                   v        +---------+
+   watch_tx: uart_frame()   | RX FIFO | --> host_rx: rx_get(), check == other[i]
+   check == pattern[i]      +---------+
+```
 
-// ---- Host clears the error flag ----
-host_irq_clr = 8'h1 << ERR_FLAG;  // write 1 to clear flag 5
-step(1);                      // the clear takes effect on this clock
-host_irq_clr = 0;             // stop clearing
-step(1);
-check(irq_flags, 0);          // flag is clear
+Four threads run at once (`fork ... join`). The two directions have unrelated timing, and the external device's frame phase changes from frame to frame.
 
-// ---- A good frame after the error ----
-drive_frame(8'h69, bc, 1);    // send 0x69, stop bit high
-rx_get(b, 4 * bc);            // read it from the RX FIFO
-check(b, 8'h69);              // RX still works
+```systemverilog
+reset_all(div << 8);
+loopback = 0;
+en = 1;
+step(5);
+fork
+    host_tx:   tx_put(pattern[i])               x8
+    watch_tx:  uart_frame(); check(b, pattern[i])  x8   // exact timing, every bit
+    device_tx: step(7); drive_frame(other[i]); step(i)  x8
+    host_rx:   rx_get(b); check(b, other[i])     x8
+join
+check(both_low > 10 * 12 * div);  // the two directions really overlapped
+check(irq_flags, 0);
+check(stalls, 0);
+```
+
+### 5. Loopback (`test_loopback`, divisors 1, 3 and 2.5)
+
+Code: `tb_sm_uart.sv` lines 596–613.
+
+```
+ tx_put(pattern[i]) --> TX FIFO --> dut --GPIO 6--> mux (loopback = 1) --GPIO 2--> dut --> RX FIFO --> rx_get(b)
+```
+
+The SM receives its own transmission. At divisor 2.5 the SM ticks every 2 or 3 clocks, so bits are not all the same length in clocks. This checks the slot timing with a fractional divider.
+
+```systemverilog
+reset_all(div);               // loopback = 1
+en = 1;
+tx_put(pattern[...]);         // x4, two groups
+rx_get(b, ...);               // x4
+check(b, pattern[...]);       // received == sent
+step(...);
+check(rx_cnt, 0);             // no extra bytes
+check(irq_flags, 0);          // no framing error
+check(in_idle(pc), 1);        // RX back in the idle slot
+check(stalls, 0);
+```
+
+### 6. Framing error (`test_rx_framing`, divisors 1 and 2)
+
+Code: `tb_sm_uart.sv` lines 617–654.
+
+```
+ drive_frame(.., stop)  <- external device
+    |
+    | GPIO 2
+    v
++-------------------+  irq_set, flag 4   +-----------+
+|        dut        | -----------------> | irq_flags | <-- host_irq_clr
++-------------------+                    +-----------+
+    |          |
+    |          +--> GPIO 6: tx_put(0xA5) during the break, uart_frame() checks it
+    v
++---------+
+| RX FIFO | --> nothing pushed for the bad frame
++---------+
+```
+
+```systemverilog
+reset_all(div << 8);
+loopback = 0;
+en = 1;
+step(5);
+drive_frame(8'h96, bc, 1);    // good frame
+rx_get(b); check(b, 8'h96);
+
+drive_frame(8'h00, bc, 0);    // stop bit low; line stays low (a break)
+step(2 * bc);
+check(rx_cnt, 0);             // bad frame not pushed
+check(irq_flags, 1 << 4);     // flag 4 set by irq 4 rel
+check(in_waithigh(pc), 1);    // waiting for the line to go high
+tx_put(8'hA5);                // TX still works during the break
+uart_frame(bc, b, idle); check(b, 8'hA5);
+check(in_waithigh(pc), 1);    // still waiting
+check(rx_cnt, 0);             // no phantom frames
+
+drv_line = 1;                 // break ends
+step(bc);
+check(in_idle(pc), 1);        // back to idle
+host_irq_clr = 1 << 4;        // host clears flag 4 (write 1 to clear)
+step(1); host_irq_clr = 0; step(1);
+check(irq_flags, 0);
+
+drive_frame(8'h69, bc, 1);    // good frame after the error
+rx_get(b); check(b, 8'h69);
 check(irq_flags, 0);          // no new error
+check(stalls, 0);
 ```
 
-### 5. RX FIFO full (`test_rx_fifo_full`)
+### 7. RX FIFO full (`test_rx_fifo_full`)
 
-Code: `tb_sm_uart.sv` lines 545–559. Called at line 570.
+Code: `tb_sm_uart.sv` lines 658–677.
 
 ```
- tx_put() x 5
-    |
-    v
-+---------+         +----------------+  GPIO 6 -> mux (loopback = 1) -> GPIO 2
-| TX FIFO | ------> |     tx_sm      | --------------------------------------+
-+---------+         +----------------+                                       |
-                                                                             |
-                    +----------------+                                       |
-                    |     rx_sm      | <-------------------------------------+
-                    | stalls on push |
-                    +----------------+
-                       |          |
-                       | byte 5   |
-                       | waits    +--> rx_pc: check == 8 (push)
-                       v
-                  +-----------------+
-                  |     RX FIFO     | -----> rx_cnt: check == 4 (full)
-                  | bytes 1-4, full |
-                  +-----------------+
-                       |
-                       | nothing is read until the checks above pass
-                       v
-                  rx_get(b) x 5: check all 5 bytes, in order
+ tx_put() x6 --> TX FIFO --> dut --loopback--> dut --> RX FIFO (holds 4; bytes 5, 6 dropped)
+                                                          |
+                                                          v  nothing read until the end
 ```
 
-Loopback at divisor 1, and the host doesn't read. Five bytes are sent:
-
-- the first four fill the RX FIFO;
-- the fifth stalls the RX SM on `push` (address 8);
-- reading bytes lets the fifth through, and all five come out in order.
-
-On a real line, a sixth byte arriving during that stall would be lost. This test doesn't send one.
-
-#### Line by line
+`push noblock` drops a byte when the RX FIFO is full, instead of stalling and stopping TX.
 
 ```systemverilog
-// ---- Startup ----
-reset_all(24'h0100);          // divisor 1; loopback = 1
-start();                      // turn on both SMs
-
-// ---- Send 5 bytes, and the host doesn't read ----
-tx_put(pattern[...]);         // x5: host writes 5 bytes
-step(5 * 10 * 8 + 40);        // 5 frames x 10 bits x 8 cycles, plus margin
-check(rx_cnt, 4);             // RX FIFO is full with bytes 1-4
-check(rx_pc, RX_PUSH);        // SM stalls on push, holding byte 5 in the ISR
-
-// ---- Host reads: the stalled byte gets through ----
-rx_get(b, 20);                // x5: read a byte; the first read frees a slot,
-                              // so the stalled push completes
-check(b, pattern[...]);       // all 5 bytes come out, in order
+reset_all(24'h0100);          // divisor 1, loopback
+en = 1;
+tx_put(pattern[...]);         // x6, host doesn't read
+step(...);                    // all 6 frames go out
+check(rx_cnt, 4);             // FIFO full with bytes 1-4
+check(tx_cnt, 0);             // TX sent all 6: it never stopped
+check(stalls, 0);
+rx_get(b); check(b, pattern[...]);  // x4: bytes 1-4 in order
+check(rx_cnt, 0);             // bytes 5 and 6 were dropped
+tx_put(8'h3C);
+rx_get(b); check(b, 8'h3C);   // receiving works again
 ```
 
 ---
 
-## 5. Does it catch bugs?
+## 6. Does it catch bugs?
 
-Each of these was put into a copy of the design or testbench, and the test failed every time:
+Each of these was put into a copy of `sm_no_smx_instr.sv`, and the test failed every time:
 
-| Bug | Caught by |
+| Bug in the SM | Caught by |
 |---|---|
-| RX ISR shifts left instead of right | Loopback: `0x55` came back as `0xAA` |
-| OSR always shifts left | TX: `0x55` sent as `0xAA` |
-| Delay one cycle short | TX: bit 0 lasted 7 cycles, not 8 |
-| `jmp pin` always taken | Framing: the bad frame was pushed |
-| `jmp pin` ignores `JMP_PIN` (reads GPIO 0) | Framing: the bad frame was pushed |
+| `pull noblock` doesn't copy X when the FIFO is empty | TX: line not idle high |
+| `push iffull` ignores the threshold | TX: init pushed an empty word |
+| `jmp pin` ignores `JMP_PIN` (reads GPIO 0) | RX: no byte received |
+| IN ignores `IN_BASE` | RX: byte read as `0xFF` |
+| `pull ifempty` always pulls | TX: bit 1 changed after 4 of 12 cycles |
 
 ---
 
-## 6. Things to look at in the waveform
+## 7. Things to look at in the waveform
 
-Open `sim_outputs/modules/sv/sm_uart.fst` in GTKWave or Surfer and add:
+Open `sim_outputs/modules/sv/sm_uart.fst` and add:
 
-| Signal | Shows |
-|---|---|
-| `tx_line`, `rx_line` | The UART line |
-| `tx_pc`, `rx_pc` | Which instruction each SM is on |
-| `tx_sm.osr_q`, `tx_sm.osr_cnt` | Bits left to send |
-| `rx_sm.isr_q`, `rx_sm.isr_cnt` | Bits received so far |
-| `tx_cnt`, `rx_cnt` | FIFO fill levels |
-| `tx_pop`, `rx_push` | FIFO transfers |
-| `irq_flags` | Flag 5 = framing error |
-
-A good first look is one loopback frame at divisor 1: `rx_pc` should go 0 → 1, stay on 1 for the delay, then alternate 2 and 3 eight times, sampling `rx_line` in the middle of each bit.
+- `tb_sm_uart.dut.pc`: idle (4–6), filler (7–9), bit loop (10–17), stop (18–25), wait-high (26–28).
+- `tb_sm_uart.tx_line` and `tb_sm_uart.rx_line`: the two wires.
+- `tb_sm_uart.dut.osr_q`, `tb_sm_uart.dut.osr_cnt`: the TX word shifting out, and the count reaching 8 every 8 slots (4 words per frame).
+- `tb_sm_uart.dut.isr_q`, `tb_sm_uart.dut.y`: RX bits arriving, and the bit counter.
+- `tb_sm_uart.tx_pop`, `tb_sm_uart.rx_push`, `tb_sm_uart.irq_flags`.
 
 ---
 
-## 7. Adding a test
+## 8. Limits of this design
 
-1. Write a `task automatic test_<name>();`.
-2. Start it with `reset_all(<div>)`, then change `loopback`, the configs or the programs if needed.
-3. Enable one or both SMs (`en_tx`, `en_rx`, or `start()`).
-4. Use `tx_put`, `rx_get`, `uart_frame`, `drive_frame` and `step`, and `check` the results.
-5. Call the task from the `initial` block at the end of the file, before the `$display`.
+- **Same baud rate both ways.** TX and RX share the slot timing, so both directions run at 12 SM cycles per bit.
+- **RX accuracy.** Samples land 33–67% of the way through each bit. That is plenty for a clean line and normal clock mismatch, but it's coarser than a 16× oversampling UART.
+- **Host does the framing.** The host must send `frame_word(b)` as 4 FIFO words, not the raw byte. It must write all 4 together into an empty FIFO, so only one byte can be queued at a time and TX uses 4 FIFO words per byte.
+- **2 padding slots per frame.** TX throughput is 10.67 bit times per byte instead of 10.
+- **Full RX FIFO drops bytes** instead of stalling, because a stall would also stop TX.
+
+---
+
+## 9. Adding a test
+
+1. Write a `task automatic test_<name>()` that starts with `reset_all(div)`, sets `loopback`, and sets `en = 1`.
+2. Drive bytes with `tx_put` / `drive_frame`, observe them with `uart_frame` / `rx_get`, and use `check` for everything.
+3. End with `check(stalls, 0, ...)`.
+4. Call it from the `initial` block before the "passed" message.

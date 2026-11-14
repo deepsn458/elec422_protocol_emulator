@@ -8,14 +8,25 @@
 //   * clockdiv - 16.8 fractional clock divider -> clock enable 'tick'
 //   * program_counter - the PC register
 //
-// The instruction memory lives outside this module:
+// The instruction memory (64 x 16-bit words) lives outside this module:
 //   * mem_addr / read_en / instr: the PC drives the address, memory returns
-//     the instruction stored there (combinational read).
-//   * branch_en / branch_addr (internal): tell the PC what to load next. When
-//     branch_en is low the PC increments (31 wraps to 0). branch_addr always holds the
-//     next PC, so stalls, delay cycles and disabled cycles hold the PC by
-//     "branching" to the current address, and wrap is a branch to
-//     WRAP_BOTTOM.
+//     the word stored there (combinational read).
+//   * Memory map:
+//       0-31   program
+//       32-33  CLKDIV    [15:0], [31:16]
+//       34-35  EXECCTRL  [15:0], [31:16]
+//       36-37  SHIFTCTRL [15:0], [31:16]
+//       38-39  PINCTRL   [15:0], [31:16]
+//   * Boot: rst puts the PC at 32. For the next 8 cycles the SM loads one
+//     word per cycle into its config registers, then branches to 0 and runs
+//     the program. Nothing executes during boot, even with en high, and the
+//     clock divider is held so its first tick is on the PC = 0 cycle. Only
+//     rst reboots; SM_RESTART keeps the loaded config.
+//   * branch_en / branch_addr (internal): tell the PC what to load next.
+//     branch_addr always holds the next PC, so stalls, delay cycles and
+//     disabled cycles hold the PC by "branching" to the current address, and
+//     wrap is a branch to WRAP_BOTTOM. During a run the PC stays in 0-31
+//     (31 wraps to 0), so pc[5] is high only during boot.
 //
 // One instruction runs per enabled cycle. An instruction that cannot finish
 // (WAIT not met, blocking PUSH/PULL on a full/empty FIFO, autopush/autopull
@@ -23,8 +34,8 @@
 // on the next enabled cycle. Delay cycles start after it completes.
 //
 // Instruction word: [15:13] opcode, [12:8] delay/side-set, [7:5] arg1,
-// [4:0] arg2. Configuration inputs use the RP2040 SMx_CLKDIV, SMx_EXECCTRL,
-// SMx_SHIFTCTRL and SMx_PINCTRL bit layouts.
+// [4:0] arg2. The configuration registers use the RP2040 SMx_CLKDIV,
+// SMx_EXECCTRL, SMx_SHIFTCTRL and SMx_PINCTRL bit layouts.
 //
 // Differences from RP2040: OUT_STICKY, INLINE_OUT_EN and FJOIN are not
 // implemented, and SM_RESTART also clears the OSR contents (RP2040 keeps
@@ -47,16 +58,10 @@ module sm_no_smx_instr #(
   input  logic        restart,             // SM_RESTART, one-cycle pulse
   input  logic        clkdiv_restart,      // CLKDIV_RESTART, one-cycle pulse
 
-  // Per-SM configuration registers (RP2040 bit layout)
-  input  logic [31:0] clkdiv,
-  input  logic [31:0] execctrl,
-  input  logic [31:0] shiftctrl,
-  input  logic [31:0] pinctrl,
-
-  // Instruction memory
-  output logic [4:0]  mem_addr,            // = PC
+  // Instruction memory: program at 0-31, config words at 32-39
+  output logic [5:0]  mem_addr,            // = PC
   output logic        read_en,
-  input  logic [15:0] instr,               // instruction memory[mem_addr]
+  input  logic [15:0] instr,               // memory[mem_addr]
 
   // TX FIFO (host -> SM), first-word fall-through
   input  logic [DATA_WIDTH-1:0] tx_data,   // oldest word, valid when !tx_empty
@@ -89,6 +94,10 @@ module sm_no_smx_instr #(
   localparam int CW      = DW_BITS + 1;
   localparam logic [CW-1:0] FULL = DATA_WIDTH;
   localparam logic [DATA_WIDTH-1:0] ONE = 1;
+
+  // Config words in instruction memory
+  localparam logic [5:0] CFG_BASE = 6'd32;
+  localparam logic [5:0] CFG_LAST = 6'd39;
 
   // OUT destinations
   localparam logic [2:0] OUT_PINS    = 3'd0;
@@ -154,6 +163,36 @@ module sm_no_smx_instr #(
   endfunction
 
   // ---------------------------------------------------------------------------
+  // Configuration registers, loaded from memory 32-39 at boot
+  // ---------------------------------------------------------------------------
+
+  logic [31:0] clkdiv, execctrl, shiftctrl, pinctrl;
+  logic [5:0]  pc;
+  logic        booting;          // PC is in 32-39: loading config
+
+  assign booting = pc[5];
+
+  always_ff @(posedge clk) begin
+    if (rst) begin               // RP2040 reset values until boot loads them
+      clkdiv    <= 32'h0001_0000;
+      execctrl  <= 32'h0001_F000;
+      shiftctrl <= 32'h000C_0000;
+      pinctrl   <= 32'h1400_0000;
+    end else if (booting) begin  // low half at the even address
+      case (pc[2:0])
+        3'd0: clkdiv[15:0]     <= instr;
+        3'd1: clkdiv[31:16]    <= instr;
+        3'd2: execctrl[15:0]   <= instr;
+        3'd3: execctrl[31:16]  <= instr;
+        3'd4: shiftctrl[15:0]  <= instr;
+        3'd5: shiftctrl[31:16] <= instr;
+        3'd6: pinctrl[15:0]    <= instr;
+        3'd7: pinctrl[31:16]   <= instr;
+      endcase
+    end
+  end
+
+  // ---------------------------------------------------------------------------
   // Configuration fields
   // ---------------------------------------------------------------------------
 
@@ -217,15 +256,16 @@ module sm_no_smx_instr #(
   logic        tick;
 
   // Program counter. pc_en is always high: the SM holds the PC on stalled,
-  // delayed and disabled cycles by branching to the current address.
-  logic [4:0]  pc;
+  // delayed and disabled cycles by branching to the current address. Reset
+  // puts it at CFG_BASE to start the boot.
   logic        branch_en;          // 1 = PC loads branch_addr
-  logic [4:0]  branch_addr;        // next PC
+  logic [5:0]  branch_addr;        // next PC
 
   program_counter #(
-    .MEM_ADDR_WIDTH (5),
-    .BYTE_INCREMENT (1),
-    .SRAM_BYTE_WIDTH(1)
+    .MEM_ADDR_WIDTH  (6),
+    .BYTE_INCREMENT  (1),
+    .SRAM_BYTE_WIDTH (1),
+    .MEM_START_OFFSET(CFG_BASE)
   ) u_pc (
     .clk        (clk),
     .rst_n      (!rst),
@@ -240,7 +280,7 @@ module sm_no_smx_instr #(
 
   clockdiv u_clockdiv (
     .clk      (clk),
-    .rst      (rst | clkdiv_restart),
+    .rst      (rst | clkdiv_restart | booting),
     .div_int  (div_int),
     .div_frac (div_frac),
     .tick     (tick)
@@ -326,7 +366,7 @@ module sm_no_smx_instr #(
   logic        stall;          // ...but cannot complete
   logic        done;           // ...and completes
 
-  assign ce          = en & tick;
+  assign ce          = en & tick & !booting;
   assign active      = ce && (delay_cnt == 5'd0);
   assign done        = active && !stall;
 
@@ -583,18 +623,24 @@ module sm_no_smx_instr #(
                          (is_mov && arg1 == MOV_PC));
   assign jump_addr = is_jmp ? arg2 :
                      is_out ? out_data[4:0] : mov_val[4:0];
-  // Only a completed instruction from instruction memory moves the PC on.
-  // Wrap applies when that instruction is at WRAP_TOP and does not jump.
+  // Boot steps through 32-39, then branches to 0. After that, only a
+  // completed instruction moves the PC on. Wrap applies when that
+  // instruction is at WRAP_TOP and does not jump. Run-time targets are
+  // 5 bits, so the PC stays in 0-31: the PC's own increment is used except
+  // at 31, which branches to 0 instead of stepping into the config words.
   always_comb begin
-    if (jump) begin
+    if (booting) begin
+      branch_en   = (pc == CFG_LAST);
+      branch_addr = (pc == CFG_LAST) ? 6'd0 : pc + 6'd1;
+    end else if (jump) begin
       branch_en   = 1'b1;
-      branch_addr = jump_addr;
-    end else if (done && pc == wrap_top) begin
+      branch_addr = {1'b0, jump_addr};
+    end else if (done && pc[4:0] == wrap_top) begin
       branch_en   = 1'b1;
-      branch_addr = wrap_bottom;
+      branch_addr = {1'b0, wrap_bottom};
     end else if (done) begin
-      branch_en   = 1'b0;
-      branch_addr = pc + 5'd1;
+      branch_en   = (pc[4:0] == 5'd31);
+      branch_addr = {1'b0, pc[4:0] + 5'd1};
     end else begin
       branch_en   = 1'b1;        // hold
       branch_addr = pc;

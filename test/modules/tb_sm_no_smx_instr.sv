@@ -14,12 +14,18 @@ module tb_sm_no_smx_instr;
     reg en;
     reg restart;
     reg clkdiv_restart;
+    // Config values a test wants. They are not ports: boot() writes them to
+    // instruction memory 32-39, and the SM loads them after its reset.
     reg [31:0] clkdiv;
     reg [31:0] execctrl;
     reg [31:0] shiftctrl;
     reg [31:0] pinctrl;
+    // The SM has its own reset so the FIFO, IRQ and GPIO models can run
+    // (e.g. tx_put) while the SM is still held before boot.
+    reg sm_rst;
+    reg booted;
 
-    wire [4:0] pc;
+    wire [5:0] pc;
     wire [15:0] instr;
     wire read_en;
     wire [W-1:0] tx_data;
@@ -41,14 +47,10 @@ module tb_sm_no_smx_instr;
 
     sm_no_smx_instr #(.SM_ID(SM_ID), .DATA_WIDTH(W)) dut (
         .clk(clk),
-        .rst(rst),
+        .rst(sm_rst),
         .en(en),
         .restart(restart),
         .clkdiv_restart(clkdiv_restart),
-        .clkdiv(clkdiv),
-        .execctrl(execctrl),
-        .shiftctrl(shiftctrl),
-        .pinctrl(pinctrl),
         .mem_addr(pc),
         .read_en(read_en),
         .instr(instr),
@@ -74,8 +76,8 @@ module tb_sm_no_smx_instr;
     // Models of the blocks around the state machine
     // ------------------------------------------------------------------------
 
-    // Instruction memory, combinational read.
-    reg [15:0] imem [0:31];
+    // Instruction memory, combinational read. 0-31 program, 32-39 config.
+    reg [15:0] imem [0:63];
     assign instr = imem[pc];
 
     // 4-deep first-word fall-through TX FIFO, written by the host.
@@ -275,10 +277,13 @@ module tb_sm_no_smx_instr;
             $error(1, "%s: got %h, expected %h", what, got, exp);
     endtask
 
-    // Full reset with RP2040 reset values for the configuration registers.
-    // Every instruction memory slot holds "jmp <self>". X and Y are not reset.
+    // Full reset with RP2040 reset values for the configuration variables.
+    // Every program slot holds "jmp <self>". X and Y are not reset. The SM
+    // stays in reset until boot(), which start() runs if a test hasn't.
     task automatic reset_all();
         rst = 1;
+        sm_rst = 1;
+        booted = 0;
         en = 0;
         restart = 0;
         clkdiv_restart = 0;
@@ -301,8 +306,28 @@ module tb_sm_no_smx_instr;
         pop_n = 0;
     endtask
 
+    // Write the config variables to instruction memory 32-39 (CLKDIV,
+    // EXECCTRL, SHIFTCTRL, PINCTRL; low half first).
+    task automatic write_cfg();
+        {imem[33], imem[32]} = clkdiv;
+        {imem[35], imem[34]} = execctrl;
+        {imem[37], imem[36]} = shiftctrl;
+        {imem[39], imem[38]} = pinctrl;
+    endtask
+
+    // Release the SM reset and let it load its config (8 cycles). Afterwards
+    // the PC is 0 and the next cycle is the first program cycle.
+    task automatic boot();
+        write_cfg();
+        sm_rst = 0;
+        step(8);
+        booted = 1;
+    endtask
+
     // Start the program; cycle 0 is the first cycle after this call.
     task automatic start();
+        if (!booted)
+            boot();
         en = 1;
         cyc = 0;
         rx_n = 0;
@@ -368,6 +393,84 @@ module tb_sm_no_smx_instr;
         data = frame[8:1];
     endtask
 
+    task automatic test_boot();
+        // ====================================================================
+        // 0. Boot: after reset the SM loads its config from memory 32-39,
+        //    then runs the program from address 0. Nothing executes during
+        //    boot, even when enabled with data waiting in the TX FIFO.
+        // ====================================================================
+        reset_all();
+        imem[0] = i_set(S_PINDIRS, 1);
+        imem[1] = i_set(S_PINS, 1);
+        imem[2] = i_set(S_PINS, 0);
+        clkdiv    = 32'h0001_00C3;                       // divisor 1; low byte unused but stored
+        execctrl  = execctrl_f(1, 0, 7, 2, 1, 0, 3);     // wrap 2 -> 1
+        shiftctrl = shiftctrl_f(5, 9, 1, 0, 1, 0);       // autopull on
+        pinctrl   = pinctrl_f(2, 1, 3, 2, 4, 5, 6);      // SET -> GPIO 5
+        write_cfg();
+        tx_put(16'h1234);                                // autopull would pop this if running
+        en = 1;
+        check(pc, 32, "boot: reset puts the PC at 32");
+        sm_rst = 0;
+        for (int k = 0; k < 8; k++) begin
+            check(pc, 32 + k, "boot: pc");
+            check(dut.booting, 1, "boot: booting");
+            check(dut.done, 0, "boot: no instruction executes");
+            check(pins_we, 0, "boot: no pin writes");
+            check(dirs_we, 0, "boot: no direction writes");
+            check(tx_pop, 0, "boot: no TX pop");
+            check(rx_push, 0, "boot: no RX push");
+            check(irq_set | irq_clr, 0, "boot: no IRQ");
+            step(1);
+        end
+        booted = 1;
+        check(pc, 0, "boot: branch from 39 to 0");
+        check(dut.booting, 0, "boot: finished");
+        check(dut.clkdiv, clkdiv, "boot: CLKDIV loaded");
+        check(dut.execctrl, execctrl, "boot: EXECCTRL loaded");
+        check(dut.shiftctrl, shiftctrl, "boot: SHIFTCTRL loaded");
+        check(dut.pinctrl, pinctrl, "boot: PINCTRL loaded");
+        check(tx_level, 1, "boot: TX FIFO untouched");
+        check(dut.done, 1, "boot: first instruction runs right after 39");
+        step(1);
+        check(gpio_oe, 16'h0020, "boot: set pindirs uses the loaded SET_BASE");
+        step(1);
+        check(gpio_out[5], 1, "boot: set pins");
+        step(1);
+        check(pc, 1, "boot: loaded wrap 2 -> 1");
+        // SM_RESTART does not reboot: the PC and config are kept.
+        restart = 1;
+        step(1);
+        restart = 0;
+        check(dut.booting, 0, "restart: no reboot");
+        check(dut.pinctrl, pinctrl, "restart: config kept");
+        // A new reset boots again with new config. Divisor 4: the divider is
+        // held during boot, so the first tick is still the PC = 0 cycle.
+        // The program runs address 31, which must go to 0, not into 32-39.
+        en = 0;
+        imem[0] = i_jmp(C_ALWAYS, 31);
+        imem[31] = i_set(S_X, 21);
+        clkdiv = {16'd4, 8'd0, 8'd0};
+        execctrl = execctrl_f(0, 0, 0, 5, 0, 0, 0);      // wrap 5 -> 0, not at 31
+        pinctrl = pinctrl_f(0, 1, 0, 0, 0, 9, 0);        // SET -> GPIO 9
+        write_cfg();
+        en = 1;
+        sm_rst = 1;
+        step(1);
+        sm_rst = 0;
+        check(pc, 32, "reboot: pc back to 32");
+        step(8);
+        check(pc, 0, "reboot: pc 0");
+        check(dut.pinctrl, pinctrl, "reboot: new PINCTRL loaded");
+        check(dut.done, 1, "reboot div 4: first tick on the PC = 0 cycle");
+        step(1);
+        check(pc, 31, "reboot: jmp 31");
+        step(4);
+        check(dut.x, 21, "reboot: address 31 ran");
+        check(pc, 0, "reboot: 31 wraps to 0, not into the config");
+        check(dut.booting, 0, "reboot: no boot after 31");
+    endtask
+
     task automatic test_instruction_encoders();
         // ====================================================================
         // 1. Encoders match pioasm output from the datasheet
@@ -396,6 +499,7 @@ module tb_sm_no_smx_instr;
         imem[2] = i_set(S_PINS, 0);
         execctrl = execctrl_f(0, 0, 0, 2, 1, 0, 0);     
         pinctrl = pinctrl_f(0, 1, 0, 0, 0, 3, 0);      // SET -> GPIO 3
+        boot();
         // Disabled: the PC is held by branching to itself.
         #1;
         check(dut.branch_en, 1, "disabled: branch_en");
@@ -1107,12 +1211,14 @@ module tb_sm_no_smx_instr;
     endtask
 
     initial begin
+    test_boot();
     test_jmp_x_dec_loop();
     $display("test passed");
     $finish;
     end
     /*
     initial begin
+        test_boot();
         test_instruction_encoders();
         test_set_and_wrap();
         test_delay();
