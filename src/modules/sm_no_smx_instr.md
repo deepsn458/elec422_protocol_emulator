@@ -1,9 +1,6 @@
 # sm_no_smx_instr.sv: how the simplified PIO state machine works
 
-`sm_no_smx_instr.sv` is one PIO state machine, modelled on chapter 3 of the RP2040 datasheet. It is a simplified version of `sm.sv`: 
-**instructions only ever come from instruction memory**. There is no SMx_INSTR port for host-forced instructions, 
-and OUT EXEC / MOV EXEC are not supported (see section 11). It decodes a 16-bit instruction and decides whether that 
-instruction can finish this cycle. It then drives the blocks that do the work:
+`sm_no_smx_instr.sv` is one PIO state machine, modelled on chapter 3 of the RP2040 datasheet. It is a simplified version of `sm.sv`: **instructions only ever come from instruction memory**. There is no SMx_INSTR port for host-forced instructions, and OUT EXEC / MOV EXEC are not supported (see section 11). It decodes a 16-bit instruction and decides whether that instruction can finish this cycle. It then drives the blocks that do the work:
 
 | Instance | Module | Job |
 |---|---|---|
@@ -13,8 +10,7 @@ instruction can finish this cycle. It then drives the blocks that do the work:
 | `u_isr` | `isr.sv` | Input shift register (IN, PUSH, autopush) |
 | `u_osr` | `osr.sv` | Output shift register (OUT, PULL, autopull) |
 
-Everything shared between state machines stays **outside** `sm_no_smx_instr.sv` and connects through ports. 
-That covers the instruction memory, the TX/RX FIFOs, the GPIO output registers and the IRQ flags.
+Everything shared between state machines stays **outside** `sm_no_smx_instr.sv` and connects through ports. That covers the instruction memory, the TX/RX FIFOs, the GPIO output registers and the IRQ flags.
 
 ```
  host regs ──► ┌────────────── sm_no_smx_instr ─────────────┐ ◄─► TX / RX FIFO
@@ -34,14 +30,42 @@ The file is organised in the order below; each heading matches a `// ---` sectio
 |---|---|---|
 | Clock/reset | `clk`, `rst` | `rst` is synchronous, active high |
 | CTRL register | `en`, `restart`, `clkdiv_restart` | `restart` and `clkdiv_restart` are one-cycle pulses |
-| Config registers | `clkdiv`, `execctrl`, `shiftctrl`, `pinctrl` | 32 bits each, **RP2040 bit layout** |
-| Instruction memory | `mem_addr`, `read_en` out; `instr` in | See section 9 |
+| Instruction memory | `mem_addr` (6 bits), `read_en` out; `instr` in | Program at 0–31, config words at 32–39. See section 1a and section 9 |
 | TX FIFO | `tx_data`, `tx_empty`, `tx_level` in; `tx_pop` out | `tx_data` must be valid *before* the pop (first-word fall-through) |
 | RX FIFO | `rx_full`, `rx_level` in; `rx_data`, `rx_push` out | |
 | GPIO | `gpio_in` in; `pins_we/wdata`, `dirs_we/wdata` out | Write masks + data, one bit per GPIO |
 | IRQ | `irq_flags` in; `irq_set`, `irq_clr` out | One-hot requests to the shared flag register |
 
 The parameter `SM_ID` (0..3) is only used for relative IRQ numbers.
+
+There are no config ports. CLKDIV, EXECCTRL, SHIFTCTRL and PINCTRL are internal 32-bit registers (RP2040 bit layout) that the SM loads from instruction memory at boot.
+
+## 1a. Memory map and boot
+
+The SM addresses a 64 × 16-bit memory:
+
+| Address | Contents |
+|---|---|
+| 0–31 | Program |
+| 32, 33 | CLKDIV[15:0], CLKDIV[31:16] |
+| 34, 35 | EXECCTRL[15:0], EXECCTRL[31:16] |
+| 36, 37 | SHIFTCTRL[15:0], SHIFTCTRL[31:16] |
+| 38, 39 | PINCTRL[15:0], PINCTRL[31:16] |
+| 40–63 | Unused by the SM |
+
+Boot sequence:
+
+1. `rst` loads the RP2040 reset values into the config registers and puts the PC at 32. The PC module's `MEM_START_OFFSET` is 32.
+2. For the next 8 cycles the PC steps through 32–39, and each word is written into its half of the config registers (low half at the even address).
+3. At 39 the PC branches to 0, and the program starts on the next cycle.
+
+During boot, `booting = pc[5]` is high:
+- `ce` is forced low, so nothing executes even if `en` is already high and the FIFOs have data. The config words still pass through `decode`, but they have no effect.
+- The clock divider is held in reset, so its first tick lands on the PC = 0 cycle, the same as before boot existed.
+
+Rules:
+- **Only `rst` boots.** `restart` (SM_RESTART) keeps the loaded config. To change config, write new words to 32–39 and reset the SM.
+- **Programs live in 0–31.** JMP targets, OUT PC, MOV PC, WRAP_TOP and WRAP_BOTTOM are all 5 bits. When a completed instruction at 31 doesn't jump or wrap, the PC goes to 0, not into the config words.
 
 ## 2. Helpers
 
@@ -54,22 +78,17 @@ Small functions used throughout:
 
 ## 3. Configuration fields
 
-These are plain `assign`s that slice the config registers into named fields (`wrap_top`, `pull_thresh`, `out_base`, ...). The thresholds go through `count32`, 
-so `pull_thresh` / `push_thresh` are 6-bit values in the range 1..32. The counts are clamped: SET and side-set to at most 5, OUT to at most 32.
+These are plain `assign`s that slice the config registers into named fields (`wrap_top`, `pull_thresh`, `out_base`, ...). The thresholds go through `count32`, so `pull_thresh` / `push_thresh` are 6-bit values in the range 1..32. The counts are clamped: SET and side-set to at most 5, OUT to at most 32.
 
 ## 4. Submodules
 
 **decode**: purely combinational. Section 6 describes it.
 
-**clockdiv**: `tick` is high for one cycle every `INT + FRAC/256` cycles on average. The SM only runs program instructions when `ce = en & tick`. 
-                The clock itself is never divided. `clkdiv_restart` resets the divider so it ticks on the next cycle.
+**clockdiv**: `tick` is high for one cycle every `INT + FRAC/256` cycles on average. The SM only runs program instructions when `ce = en & tick & !booting`. The clock itself is never divided. `clkdiv_restart` resets the divider so it ticks on the next cycle. The divider is also held in reset during boot.
 
-**regfile (X, Y)**: instantiated with `NUMREGS = 3`, and register 0 is the hardwired zero. The two read ports are tied permanently to X (`src_reg_1 = 1`) and Y (`src_reg_2 = 2`). 
-                    JMP X!=Y needs both at once, so `x` and `y` are always available. One write port (`xy_we`, `xy_addr`, `xy_wdata`) is enough, because no instruction writes both. 
-**The regfile writes on the falling clock edge**; see section 7 for why this matters.
+**regfile (X, Y)**: instantiated with `NUMREGS = 3`, and register 0 is the hardwired zero. The two read ports are tied permanently to X (`src_reg_1 = 1`) and Y (`src_reg_2 = 2`). JMP X!=Y needs both at once, so `x` and `y` are always available. One write port (`xy_we`, `xy_addr`, `xy_wdata`) is enough, because no instruction writes both. **The regfile writes on the falling clock edge**; see section 7 for why this matters.
 
-**isr**: `n` is the instruction's bit-count field (`arg2`), and `dir` is IN_SHIFTDIR. `ce` is tied to 1 because the SM gates the `load`/`shift` strobes itself. 
-        The isr's synchronous `rst` is driven by `rst | restart | isr_clear`. That reset is also how PUSH and autopush clear the ISR (section 8).
+**isr**: `n` is the instruction's bit-count field (`arg2`), and `dir` is IN_SHIFTDIR. `ce` is tied to 1 because the SM gates the `load`/`shift` strobes itself. The isr's synchronous `rst` is driven by `rst | restart | isr_clear`. That reset is also how PUSH and autopush clear the ISR (section 8).
 
 **osr**: `n` = `arg2`, `dir` = OUT_SHIFTDIR. `shifted` (the bits leaving, right-aligned) is called `out_data` in the SM. That is what OUT writes to its destination.
 
@@ -90,8 +109,7 @@ There is only one instruction source: `instr` from instruction memory, fed strai
 assign done = active && !stall;
 ```
 
-Almost every side effect (register writes, shifts, pin writes, FIFO pushes) is gated by `done`. A stalled instruction does nothing except side-set, 
-and it runs again on the next enabled cycle because the PC holds.
+Almost every side effect (register writes, shifts, pin writes, FIFO pushes) is gated by `done`. A stalled instruction does nothing except side-set, and it runs again on the next enabled cycle because the PC holds.
 
 ## 6. Decode (`decode.sv`)
 
@@ -279,12 +297,15 @@ gpio_out <= (gpio_out & ~pins_we) | (pins_wdata & pins_we);
 
 ## 9. Program counter control
 
-The PC is `program_counter.sv`, instantiated inside the SM as `u_pc` (5-bit address, increment 1). Its `pc` drives `mem_addr`, and its `read_en` goes straight out. The SM tells it what to do next through the internal `branch_en`/`branch_addr`:
+The PC is `program_counter.sv`, instantiated inside the SM as `u_pc` (6-bit address, increment 1, reset to 32). Its `pc` drives `mem_addr`, and its `read_en` goes straight out. The SM tells it what to do next through the internal `branch_en`/`branch_addr`:
 
 | This cycle | `branch_en` | `branch_addr` |
 |---|---|---|
+| Boot, PC = 32–38 | 0 | `pc + 1` |
+| Boot, PC = 39 | 1 | 0 |
 | Completed JMP (condition true), OUT PC or MOV PC | 1 | target |
 | Completed instruction at `WRAP_TOP`, no jump | 1 | `WRAP_BOTTOM` |
+| Completed instruction at 31, otherwise | 1 | 0 |
 | Completed instruction, otherwise | 0 | `pc + 1` |
 | Anything else: stalled, delay cycle, no tick, disabled | 1 | `pc` (hold) |
 
@@ -298,7 +319,8 @@ The `always_ff @(posedge clk)` block holds the SM's own state:
 
 - **`delay_cnt`** loads the instruction's delay when it completes, then counts down on each `ce`. While it is nonzero, `active` is 0. Delay starts only after a stall ends, because it loads on `done`.
 - **`irq_waiting`** is set on the first cycle of `irq wait` and cleared when the instruction completes.
-- **`rst` / `restart`** clear all of the above. `restart` also clears the ISR and resets the OSR count to 32, but keeps X, Y and the PC.
+- **Config registers** (`clkdiv`, `execctrl`, `shiftctrl`, `pinctrl`) take RP2040 reset values on `rst` and are loaded during boot (section 1a).
+- **`rst` / `restart`** clear all of the above. `restart` also clears the ISR and resets the OSR count to 32, but keeps X, Y, the PC and the config.
 
 ## 11. Differences from RP2040
 
@@ -314,4 +336,6 @@ The `always_ff @(posedge clk)` block holds the SM's own state:
 - **FIFO:** `tx_data` must show the oldest word while `tx_empty` is 0. The current `fifo.sv` outputs data one cycle *after* `r_en` and keeps `full`/`empty` internal. It needs a fall-through output plus `full`, `empty` and level ports.
 - **Timing:** the regfile's write path has half a clock period (rising edge to falling edge). Testbench inputs should change just after the rising edge, not at the falling edge.
 - **X and Y have no reset.** Programs must initialise them (there is no forced-instruction path for the host to do it).
-- **Tests:** run `make sim_tb_sm_no_smx_instr` from `test/`. `test/modules/tb_sm_no_smx_instr.sv` runs 16 groups of small PIO programs against this module.
+- **Memory:** the SM assumes a combinational read (`instr` = memory[`mem_addr`] in the same cycle), both for boot and for the program. The IHP SRAM reads synchronously, so the top level needs to handle that latency.
+- **Loading:** the host writes the program to 0–31 and the config to 32–39, then releases the SM's reset. The SM is ready to run 8 cycles later.
+- **Tests:** run `make sim_tb_sm_no_smx_instr` from `test/`. `test/modules/tb_sm_no_smx_instr.sv` runs small PIO programs against this module. `test_boot` covers the boot sequence. The testbench gives the SM its own reset (`sm_rst`), and `start()` boots it with the config the test set.
