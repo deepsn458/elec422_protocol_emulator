@@ -1,0 +1,23 @@
+.program pulse_test
+
+; Boot register values. The assembler fills in wrap and side-set fields.
+.set_clkdiv    0x00010000  ; Clock divider = 1.0
+.set_execctrl  0x00000000  ; Wrap and side-set mode come from the directives.
+.set_shiftctrl 0x000C0000  ; Shift IN and OUT to the right.
+.set_pinctrl   0x14000000  ; GPIO base addresses are 0, SET_COUNT is 5.
+
+.side_set 1 opt
+
+    set pindirs, 1      ; Address 0. Set GPIO 0 to output using the default mapping.
+
+; Uncomment the next line and the final .wrap to test an explicit wrap from 5 to 1.
+; .wrap_target
+    set x, 2            ; Address 1. Load the counter for three pulses.
+pulse:
+    nop side 1 [1]     ; Address 2. Drive GPIO 0 high for two cycles.
+    nop side 0 [1]     ; Address 3. Drive GPIO 0 low.
+    jmp x-- pulse      ; Address 4. Branch twice, then fall through.
+    irq clear 0        ; Address 5. Assembles as NOP while IRQ is reserved.
+; .wrap
+
+; With both directives commented out, the default wrap is from address 31 to 0.
