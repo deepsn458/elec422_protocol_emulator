@@ -8,6 +8,7 @@ Total usage: 3 input and 1 output
 
 Remaining:
 7 output, 8 bidirectional, 5 input.
+7 output, 8 bidirectional, 4 input.
 
 GPIO numberting
 Pin 0-3: input
