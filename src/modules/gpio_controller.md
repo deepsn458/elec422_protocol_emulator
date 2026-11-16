@@ -1,23 +1,18 @@
 We have 8 inputs 8 outputs and 8 bidirectional pins.
 
-Trying to save as many bidirectional pins as possible because they are more useful than either input or output
-Reserved
+Reserved (Note the clk, rst, vdd, and gnd pins are provided already and not included as part of the 24 pin quota)
 
-- clk (input)
-- rst (input)
-- vdd (input)
-- gnd (input)
-- spi interface for instruction mem (mux to fifos)(sclk: input . mosi: output. Miso: input. cs: input)
+- spi interface for instruction mem (mux to fifos)(sclk: input . mosi: input. Miso: output. cs: input)
 
-Total usage: 7 input, 1 output
+Total usage: 3 input and 1 output
 
 Remaining:
-7 output, 8 bidirectional, 1 input.
+7 output, 8 bidirectional, 5 input.
 
 GPIO numberting
-Pin 0: input
-Pins 1-8: bidirectional
-Pins 9-15: output
+Pin 0-3: input
+Pins 4-11: bidirectional
+Pins 12-15: output
 
 ## Runtime Pin handling logic
 1. GPIO controller takes 3 control signals signaling if the instr sets a pindir, performs a read, or a write
@@ -39,7 +34,7 @@ assign invalid_input =
 assign gpio_fault =
     invalid_dir | invalid_output | invalid_input;
 ```
-4. Feeds the gpio fault to the sm which handles (throws an exception)
+4. Feeds the gpio fault to the sm which branches to the `FAULT_VEC`
 
 This prevents us making the assembler from becoming a compiler by performing extensive pre-scanning and pre-mapping.
 
