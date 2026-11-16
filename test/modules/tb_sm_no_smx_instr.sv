@@ -41,6 +41,7 @@ module tb_sm_no_smx_instr;
     wire [W-1:0] pins_wdata;
     wire [W-1:0] dirs_we;
     wire [W-1:0] dirs_wdata;
+    wire [W-1:0] pins_re;
     reg gpio_fault;              // stands in for the GPIO controller
     reg [7:0] irq_flags;
     wire [7:0] irq_set;
@@ -68,6 +69,7 @@ module tb_sm_no_smx_instr;
         .pins_wdata(pins_wdata),
         .dirs_we(dirs_we),
         .dirs_wdata(dirs_wdata),
+        .pins_re(pins_re),
         .gpio_fault(gpio_fault),
         .irq_flags(irq_flags),
         .irq_set(irq_set),
@@ -1296,10 +1298,54 @@ module tb_sm_no_smx_instr;
         check(pc, 7, "fault d: stays in handler");
     endtask
 
+    task automatic test_pins_re();
+        // ====================================================================
+        // pins_re: the GPIOs each instruction reads, for the GPIO controller
+        // ====================================================================
+        reset_all();
+        imem[0] = i_in(IN_PINS, 3);                    // IN_BASE 4 -> GPIO 4-6
+        imem[1] = i_wait(1, W_GPIO, 9);                // GPIO 9 (absolute)
+        imem[2] = i_wait(1, W_PIN, 2);                 // IN_BASE + 2 = GPIO 6
+        imem[3] = i_jmp(C_PIN, 4);                     // JMP_PIN = GPIO 9
+        imem[4] = i_mov(MD_X, MOP_NONE, MS_PINS);      // not reported
+        imem[5] = i_set(S_PINS, 1);                    // a write, not a read
+        imem[6] = i_jmp(C_ALWAYS, 6);
+        execctrl = execctrl_f(0, 0, 9, 31, 0, 0, 0);
+        pinctrl = pinctrl_f(0, 1, 0, 4, 0, 3, 0);      // IN_BASE 4, SET -> GPIO 3
+        ext_in = 16'h0240;                             // GPIO 6 and 9 high
+        boot();
+        #1;
+        check(pins_re, 0, "pins_re: 0 while disabled");
+        start();
+        #1;
+        check(pins_re, 16'h0070, "pins_re: in pins, 3");
+        step(1);
+        check(pins_re, 16'h0200, "pins_re: wait gpio 9");
+        step(1);
+        check(pins_re, 16'h0040, "pins_re: wait pin 2");
+        step(1);
+        check(pins_re, 16'h0200, "pins_re: jmp pin");
+        step(1);
+        check(pc, 4, "pins_re: jmp pin taken");
+        check(pins_re, 0, "pins_re: mov x, pins not reported");
+        step(1);
+        check(pins_re, 0, "pins_re: set pins");
+
+        // A stalled WAIT keeps reporting its pin.
+        reset_all();
+        imem[0] = i_wait(1, W_GPIO, 12);
+        ext_in = 0;
+        start();
+        step(3);
+        check(pc, 0, "pins_re: wait stalled");
+        check(pins_re, 16'h1000, "pins_re: stalled wait gpio 12");
+    endtask
+
     initial begin
     test_boot();
     test_jmp_x_dec_loop();
     test_gpio_fault();
+    test_pins_re();
     $display("test passed");
     $finish;
     end
@@ -1327,6 +1373,7 @@ module tb_sm_no_smx_instr;
         test_data_width_limits();
         test_uart_tx();
         test_gpio_fault();
+        test_pins_re();
 
         $display("SM SystemVerilog test passed");
         $finish;

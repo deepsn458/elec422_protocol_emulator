@@ -84,6 +84,10 @@ module sm_no_smx_instr #(
 
   // GPIO: DATA_WIDTH-bit write masks and data for pin levels and directions
   input  logic [DATA_WIDTH-1:0] gpio_in,
+  // GPIOs this cycle's instruction reads (IN PINS, WAIT GPIO/PIN, JMP PIN),
+  // for the GPIO controller's read check. MOV x, PINS reads all pins and is
+  // not reported: pins that cannot be read just read as 0.
+  output logic [DATA_WIDTH-1:0] pins_re,
   output logic [DATA_WIDTH-1:0] pins_we,
   output logic [DATA_WIDTH-1:0] pins_wdata,
   output logic [DATA_WIDTH-1:0] dirs_we,
@@ -515,6 +519,21 @@ module sm_no_smx_instr #(
       2'd2:    wait_bit = irq_flags[irq_idx];
       default: wait_bit = wait_pol;                 // reserved: never waits
     endcase
+  end
+
+  // Pins read by this cycle's instruction (stalled WAITs keep reading).
+  always_comb begin
+    pins_re = '0;
+    if (active) begin
+      if (is_in && arg1 == 3'd0)                    // IN PINS, n
+        pins_re = rotl(lowmask(io_count), in_base);
+      else if (is_wait && wait_src == 2'd0)         // WAIT GPIO idx
+        pins_re = ONE << arg2[DW_BITS-1:0];
+      else if (is_wait && wait_src == 2'd1)         // WAIT PIN idx
+        pins_re = rotl(ONE << arg2[DW_BITS-1:0], in_base);
+      else if (is_jmp && arg1 == 3'd6)              // JMP PIN
+        pins_re = ONE << jmp_pin;
+    end
   end
 
   logic in_push;      // IN reaches the autopush threshold
