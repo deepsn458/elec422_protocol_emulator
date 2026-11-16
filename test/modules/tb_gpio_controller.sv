@@ -5,11 +5,11 @@
 
 module tb_gpio_controller;
     localparam int W = 16;
-    // Default mapping: GPIO 0 input, 1-8 bidirectional, 9-15 output.
-    localparam [W-1:0] IN_ONLY  = 16'h0001;
-    localparam [W-1:0] BIDIR    = 16'h01FE;
-    localparam [W-1:0] OUT_ONLY = 16'hFE00;
-    localparam [W-1:0] SAFE2    = 16'h8200;   // second instance: GPIO 9, 15 idle high
+    // Default mapping: GPIO 0-3 input, 4-11 bidirectional, 12-15 output.
+    localparam [W-1:0] IN_ONLY  = 16'h000F;
+    localparam [W-1:0] BIDIR    = 16'h0FF0;
+    localparam [W-1:0] OUT_ONLY = 16'hF000;
+    localparam [W-1:0] SAFE2    = 16'hA000;   // second instance: GPIO 13, 15 idle high
 
     reg clk;
     reg rst;
@@ -138,34 +138,34 @@ module tb_gpio_controller;
         check(gpio_in, IN_ONLY | BIDIR, "gpio_in masks output-only pins");
         pad_in = 16'h5A5A;
         #1;
-        check(gpio_in, 16'h5A5A & 16'h01FF, "gpio_in passes readable pins");
+        check(gpio_in, 16'h5A5A & 16'h0FFF, "gpio_in passes readable pins");
 
-        // Valid accesses: set pindirs on GPIO 3, drive GPIO 3 and 10, read 0-8.
-        access(0, 0, 16'h0008, 16'h0008, 0, 0, "set pindirs gpio 3");
-        check(pad_oe, OUT_ONLY | 16'h0008, "gpio 3 is an output");
-        access(16'h0408, 16'h0408, 0, 0, 0, 0, "set pins gpio 3, 10");
-        check(pad_out, 16'h0408, "gpio 3, 10 driven high");
-        access(0, 0, 0, 0, 16'h01FF, 0, "read gpio 0-8");
-        access(16'h0400, 0, 0, 0, 0, 0, "clear gpio 10");
-        check(pad_out, 16'h0008, "gpio 10 low");
+        // Valid accesses: set pindirs on GPIO 5, drive GPIO 5 and 13, read 0-11.
+        access(0, 0, 16'h0020, 16'h0020, 0, 0, "set pindirs gpio 5");
+        check(pad_oe, OUT_ONLY | 16'h0020, "gpio 5 is an output");
+        access(16'h2020, 16'h2020, 0, 0, 0, 0, "set pins gpio 5, 13");
+        check(pad_out, 16'h2020, "gpio 5, 13 driven high");
+        access(0, 0, 0, 0, 16'h0FFF, 0, "read gpio 0-11");
+        access(16'h2000, 0, 0, 0, 0, 0, "clear gpio 13");
+        check(pad_out, 16'h0020, "gpio 13 low");
         // Side-set style: pins and dirs in the same cycle.
-        access(16'h0010, 16'h0010, 16'h0010, 16'h0010, 0, 0, "pins + dirs gpio 4");
-        check(pad_oe, OUT_ONLY | 16'h0018, "gpio 4 is an output");
-        check(pad_out, 16'h0018, "gpio 4 high");
+        access(16'h0040, 16'h0040, 16'h0040, 16'h0040, 0, 0, "pins + dirs gpio 6");
+        check(pad_oe, OUT_ONLY | 16'h0060, "gpio 6 is an output");
+        check(pad_out, 16'h0060, "gpio 6 high");
         check(fault, 0, "no fault after valid accesses");
 
-        // Dir write on an output-only pin (I2C SDA on GPIO 10). The valid
-        // write to GPIO 3 in the same cycle must not land either.
-        access(16'h0008, 0, 16'h0400, 0, 0, 1, "pindirs on output-only gpio 10");
+        // Dir write on an output-only pin (I2C SDA on GPIO 13). The valid
+        // write to GPIO 5 in the same cycle must not land either.
+        access(16'h0020, 0, 16'h2000, 0, 0, 1, "pindirs on output-only gpio 13");
         check(fault, 1, "dir fault: sticky fault");
         check(fault_cause, 3'b010, "dir fault: cause");
-        check(dut.out_q, 16'h0018, "dir fault: faulting cycle's writes dropped");
+        check(dut.out_q, 16'h0060, "dir fault: faulting cycle's writes dropped");
         check(pad_oe, OUT_ONLY, "dir fault: bidir pads released");
         check(pad_out, 0, "dir fault: outputs at SAFE_OUT");
         check(pad_out2, SAFE2, "dir fault: outputs at SAFE_OUT (instance 2)");
         // While faulted, valid writes are ignored and the pads stay safe.
-        access(16'h0200, 16'h0200, 16'h0002, 16'h0002, 0, 0, "valid write while faulted");
-        check(dut.out_q, 16'h0018, "faulted: registers frozen");
+        access(16'h1000, 16'h1000, 16'h0010, 16'h0010, 0, 0, "valid write while faulted");
+        check(dut.out_q, 16'h0060, "faulted: registers frozen");
         check(pad_oe, OUT_ONLY, "faulted: pad_oe");
         check(pad_out, 0, "faulted: pad_out");
         step(3);
@@ -180,8 +180,8 @@ module tb_gpio_controller;
         check(fault_cause, 3'b001, "drive fault: cause");
         clear();
 
-        // Read of an output-only pin (e.g. JMP PIN on GPIO 12).
-        access(0, 0, 0, 0, 16'h1000, 1, "read output-only gpio 12");
+        // Read of an output-only pin (e.g. JMP PIN on GPIO 14).
+        access(0, 0, 0, 0, 16'h4000, 1, "read output-only gpio 14");
         check(fault_cause, 3'b100, "read fault: cause");
         // A second, different fault accumulates causes.
         access(0, 0, 16'h0001, 16'h0001, 0, 1, "pindirs on input-only gpio 0");

@@ -31,16 +31,16 @@
 // them to the Tiny Tapeout ui_in / uo_out / uio_* pins. pad_oe is always 1
 // for OUT_ONLY GPIOs (uo_out has no enable).
 //
-// Default mapping (gpio_controller.md): GPIO 0 input, 1-8 bidirectional,
-// 9-15 output.
+// Default mapping (gpio_controller.md): GPIO 0-3 input, 4-11 bidirectional,
+// 12-15 output.
 
 `default_nettype none
 
 module gpio_controller #(
   parameter int DATA_WIDTH = 16,
-  parameter logic [DATA_WIDTH-1:0] IN_ONLY  = 16'h0001,
-  parameter logic [DATA_WIDTH-1:0] BIDIR    = 16'h01FE,
-  parameter logic [DATA_WIDTH-1:0] OUT_ONLY = 16'hFE00,
+  parameter logic [DATA_WIDTH-1:0] IN_ONLY  = 16'h000F,
+  parameter logic [DATA_WIDTH-1:0] BIDIR    = 16'h0FF0,
+  parameter logic [DATA_WIDTH-1:0] OUT_ONLY = 16'hF000,
   // Level for output pins at reset and while faulted (e.g. 1 for a UART TX
   // or an active-low chip select).
   parameter logic [DATA_WIDTH-1:0] SAFE_OUT = '0
