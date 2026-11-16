@@ -41,6 +41,7 @@ module tb_sm_no_smx_instr;
     wire [W-1:0] pins_wdata;
     wire [W-1:0] dirs_we;
     wire [W-1:0] dirs_wdata;
+    reg gpio_fault;              // stands in for the GPIO controller
     reg [7:0] irq_flags;
     wire [7:0] irq_set;
     wire [7:0] irq_clr;
@@ -67,6 +68,7 @@ module tb_sm_no_smx_instr;
         .pins_wdata(pins_wdata),
         .dirs_we(dirs_we),
         .dirs_wdata(dirs_wdata),
+        .gpio_fault(gpio_fault),
         .irq_flags(irq_flags),
         .irq_set(irq_set),
         .irq_clr(irq_clr)
@@ -293,6 +295,7 @@ module tb_sm_no_smx_instr;
         host_irq_set = 0;
         host_irq_clr = 0;
         ext_in = 0;
+        gpio_fault = 0;
         clkdiv = 32'h0001_0000;
         execctrl = 32'h0001_F000;
         shiftctrl = 32'h000C_0000;
@@ -1210,9 +1213,93 @@ module tb_sm_no_smx_instr;
         end
     endtask
 
+    task automatic test_gpio_fault();
+        // ====================================================================
+        // GPIO fault: the PC branches to FAULT_VEC (EXECCTRL[23:19]) on the
+        // fault cycle, whether the instruction completed, is in its delay,
+        // or is stalled. Delay and pending IRQ WAIT are cleared.
+        // ====================================================================
+        localparam [4:0] FV = 5'd20;
+
+        // a) Fault on a completed instruction that has a delay.
+        reset_all();
+        imem[0] = i_set(S_PINDIRS, 1);
+        imem[1] = dss(i_set(S_PINS, 1), 3);
+        imem[2] = i_jmp(C_ALWAYS, 1);
+        imem[FV] = i_set(S_PINS, 0);
+        imem[FV+1] = i_jmp(C_ALWAYS, FV+1);
+        execctrl = execctrl_f(0, 0, 0, 31, 0, 0, 0) | ({27'd0, FV} << 19);
+        pinctrl = pinctrl_f(0, 1, 0, 0, 0, 3, 0);      // SET -> GPIO 3
+        start();
+        step(1);
+        check(pc, 1, "fault a: at set pins [3]");
+        check(dut.done, 1, "fault a: instruction completes");
+        gpio_fault = 1;
+        #1;
+        check(dut.branch_en, 1, "fault a: branch_en");
+        check(dut.branch_addr, FV, "fault a: branch_addr = FAULT_VEC");
+        step(1);
+        gpio_fault = 0;
+        check(pc, FV, "fault a: pc = FAULT_VEC");
+        check(dut.delay_cnt, 0, "fault a: delay cleared");
+        check(dut.done, 1, "fault a: handler runs at once");
+        step(1);
+        check(pc, FV+1, "fault a: handler continues");
+        check(gpio_out[3], 0, "fault a: handler executed");
+
+        // b) Fault during the delay cycles of an instruction.
+        reset_all();
+        imem[0] = dss(i_set(S_X, 1), 5);
+        imem[1] = i_jmp(C_ALWAYS, 0);
+        imem[FV] = i_jmp(C_ALWAYS, FV);
+        execctrl = execctrl_f(0, 0, 0, 31, 0, 0, 0) | ({27'd0, FV} << 19);
+        start();
+        step(2);
+        check(pc, 1, "fault b: past set x [5]");
+        check(dut.delay_cnt, 4, "fault b: in delay");
+        check(dut.active, 0, "fault b: not executing");
+        gpio_fault = 1;
+        step(1);
+        gpio_fault = 0;
+        check(pc, FV, "fault b: pc = FAULT_VEC");
+        check(dut.delay_cnt, 0, "fault b: delay cleared");
+
+        // c) Fault while stalled in IRQ WAIT.
+        reset_all();
+        imem[0] = i_irq(0, 1, 0);                      // irq wait 0
+        imem[FV] = i_jmp(C_ALWAYS, FV);
+        execctrl = execctrl_f(0, 0, 0, 31, 0, 0, 0) | ({27'd0, FV} << 19);
+        start();
+        step(2);
+        check(pc, 0, "fault c: stalled on irq wait");
+        check(dut.irq_waiting, 1, "fault c: irq_waiting");
+        check(dut.stall, 1, "fault c: stall");
+        gpio_fault = 1;
+        #1;
+        check(dut.branch_addr, FV, "fault c: branch_addr = FAULT_VEC");
+        step(1);
+        gpio_fault = 0;
+        check(pc, FV, "fault c: pc = FAULT_VEC");
+        check(dut.irq_waiting, 0, "fault c: irq_waiting cleared");
+
+        // d) FAULT_VEC comes from EXECCTRL: a different vector.
+        reset_all();
+        imem[7] = i_jmp(C_ALWAYS, 7);
+        execctrl = execctrl_f(0, 0, 0, 31, 0, 0, 0) | (32'd7 << 19);
+        start();
+        step(3);
+        gpio_fault = 1;
+        step(1);
+        gpio_fault = 0;
+        check(pc, 7, "fault d: pc = FAULT_VEC 7");
+        step(2);
+        check(pc, 7, "fault d: stays in handler");
+    endtask
+
     initial begin
     test_boot();
     test_jmp_x_dec_loop();
+    test_gpio_fault();
     $display("test passed");
     $finish;
     end
@@ -1239,6 +1326,7 @@ module tb_sm_no_smx_instr;
         test_sm_restart();
         test_data_width_limits();
         test_uart_tx();
+        test_gpio_fault();
 
         $display("SM SystemVerilog test passed");
         $finish;

@@ -33,12 +33,19 @@
 // stall, IRQ WAIT) stalls: it has no effect except side-set, and runs again
 // on the next enabled cycle. Delay cycles start after it completes.
 //
+// GPIO fault: when the GPIO controller raises gpio_fault (a pin access the
+// pin cannot do), the PC branches to FAULT_VEC (EXECCTRL[23:19]) on that
+// cycle, whether the instruction completed, stalled or was in its delay.
+// The delay counter and any pending IRQ WAIT are cleared; other effects of
+// the faulting instruction (X/Y, ISR/OSR, FIFOs) still happen. Blocking the
+// pins themselves is the GPIO controller's job.
+//
 // Instruction word: [15:13] opcode, [12:8] delay/side-set, [7:5] arg1,
 // [4:0] arg2. The configuration registers use the RP2040 SMx_CLKDIV,
 // SMx_EXECCTRL, SMx_SHIFTCTRL and SMx_PINCTRL bit layouts.
 //
 // Differences from RP2040: OUT_STICKY, INLINE_OUT_EN and FJOIN are not
-// implemented, and SM_RESTART also clears the OSR contents (RP2040 keeps
+// implemented (EXECCTRL[23:19] holds FAULT_VEC instead of OUT_EN_SEL), and SM_RESTART also clears the OSR contents (RP2040 keeps
 // them). There is no SMx_INSTR (forced instruction) port, and OUT EXEC /
 // MOV EXEC are not supported: every instruction comes from instruction memory.
 
@@ -81,6 +88,10 @@ module sm_no_smx_instr #(
   output logic [DATA_WIDTH-1:0] pins_wdata,
   output logic [DATA_WIDTH-1:0] dirs_we,
   output logic [DATA_WIDTH-1:0] dirs_wdata,
+  // From the GPIO controller: this cycle's pin access targets a pin that
+  // cannot do it. Must be the per-cycle (combinational) fault, not a sticky
+  // flag, or the SM would be held at FAULT_VEC.
+  input  logic        gpio_fault,
 
   // IRQ flags shared by all state machines
   input  logic [7:0]  irq_flags,
@@ -199,6 +210,7 @@ module sm_no_smx_instr #(
   logic        side_en, side_pindir;
   logic [DW_BITS-1:0] jmp_pin;
   logic [4:0]  wrap_top, wrap_bottom;
+  logic [4:0]  fault_vec;
   logic        status_sel;
   logic [3:0]  status_n;
   logic [CW-1:0] pull_thresh, push_thresh;
@@ -212,6 +224,7 @@ module sm_no_smx_instr #(
   assign side_en       = execctrl[30]; // if 1, the MSB of the delay/side-set field is used to enable/disable side set
   assign side_pindir   = execctrl[29]; // if 1, side-set data is asserted to pin dirs instead of pin values
   assign jmp_pin       = execctrl[24 +: DW_BITS]; // the gpio number to use as the jmp pin (mod DATA_WIDTH)
+  assign fault_vec     = execctrl[23:19]; // GPIO fault handler address (RP2040 OUT_EN_SEL, unused here)
   assign wrap_top      = execctrl[16:12]; // after reaching this address, execution is wrapped to wrap_bottom 
   assign wrap_bottom   = execctrl[11:7]; // after reaching wrap_top, execution is wrapped to this instruction
   assign status_sel    = execctrl[4]; // if 1, use tx fifo level for comparison for MOV X, STATUS instr. Else use rx level
@@ -583,6 +596,9 @@ module sm_no_smx_instr #(
 
   // Pins. OUT and MOV use the OUT mapping, SET the SET mapping. Side-set
   // happens on every active cycle, stalled or not, and wins on overlap.
+  // os_pins: output enable signal asserted when instr is a MOV, OUT, or SET
+  // os_dirs: pin direction enable
+  // os_data: re-maps the bits to the gpio base
   logic        os_pins, os_dirs;
   logic [DATA_WIDTH-1:0] os_raw, os_mask, os_data;
   logic [DATA_WIDTH-1:0] side_pins_m, side_dirs_m, os_pins_m, os_dirs_m;
@@ -632,6 +648,10 @@ module sm_no_smx_instr #(
     if (booting) begin
       branch_en   = (pc == CFG_LAST);
       branch_addr = (pc == CFG_LAST) ? 6'd0 : pc + 6'd1;
+    end else if (gpio_fault) begin
+      // Abort the program: wins over jumps, wrap, stalls and delay.
+      branch_en   = 1'b1;
+      branch_addr = {1'b0, fault_vec};
     end else if (jump) begin
       branch_en   = 1'b1;
       branch_addr = {1'b0, jump_addr};
@@ -652,7 +672,8 @@ module sm_no_smx_instr #(
   // ---------------------------------------------------------------------------
 
   always_ff @(posedge clk) begin
-    if (rst || restart) begin
+    // A GPIO fault abandons the instruction: no delay, no pending IRQ WAIT.
+    if (rst || restart || gpio_fault) begin
       delay_cnt    <= '0;
       irq_waiting  <= 1'b0;
     end else begin
