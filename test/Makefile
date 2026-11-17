@@ -50,6 +50,11 @@ $(SM_SIM_EXES): $(SIM_OUTPUTS)/modules/sv/%.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/t
 	mkdir -p $(@D)
 	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/$*.$(WAVEFORM_EXT)\" -s tb_$* -o $@ $^
 
+# The UART testbench runs on sm_no_smx_instr (there is no sm_uart.sv).
+$(SIM_OUTPUTS)/modules/sv/sm_uart.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_sm_uart.sv $(SRC_DIR)/modules/sm_no_smx_instr.sv $(SM_SUBMODULE_SOURCES)
+	mkdir -p $(@D)
+	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/modules/sv/sm_uart.$(WAVEFORM_EXT)\" -s tb_sm_uart -o $@ $^
+
 # Use the vendor functional view for SRAM tests; the RTL file is a synthesis stub.
 $(SIM_OUTPUTS)/modules/sv/ihp_sram.$(WAVEFORM_EXT).vvp: $(MODULE_DIR)/tb_ihp_sram.sv $(SRAM_MODEL_SOURCES)
 	mkdir -p $(@D)

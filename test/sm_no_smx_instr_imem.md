@@ -1,6 +1,6 @@
 # Instructions loaded by `tb_sm_no_smx_instr.sv`
 
-The testbench models a 32-word instruction memory as `imem[0:31]`, with `instr = imem[pc]`. Every `reset_all()` fills address `i` with `i_jmp(C_ALWAYS, i)` (`jmp i`). The programs below replace only the listed addresses; every other address retains its self-jump. Entries use the exact instruction-builder expressions from the testbench, so delay and side-set fields remain unambiguous. `NOP` is `16'hA042` (`mov y, y`), and `dss(instruction, field)` inserts the five delay/side-set bits.
+The testbench models a 64-word instruction memory as `imem[0:63]`, with `instr = imem[pc]`. Addresses 0–31 hold the program and 32–39 hold the config words the SM loads at boot: CLKDIV, EXECCTRL, SHIFTCTRL, PINCTRL, low half first (`write_cfg()`). After `rst`, the PC steps through 32–39, then starts the program at 0. Every `reset_all()` fills program address `i` (0–31) with `i_jmp(C_ALWAYS, i)` (`jmp i`). The programs below replace only the listed addresses; every other address retains its self-jump. Entries use the exact instruction-builder expressions from the testbench, so delay and side-set fields remain unambiguous. `NOP` is `16'hA042` (`mov y, y`), and `dss(instruction, field)` inserts the five delay/side-set bits.
 
 Source: [`modules/tb_sm_no_smx_instr.sv`](modules/tb_sm_no_smx_instr.sv).
 
