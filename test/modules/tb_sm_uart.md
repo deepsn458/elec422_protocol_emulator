@@ -196,6 +196,63 @@ Two TX-only slots, then in slot 3 `jmp pin 3` checks the stop bit at the same po
 
 After a framing error the line may stay low (a break). Going straight back to idle would see "start bits" over and over. This slot checks for the line going high: `jmp pin 4` goes back to idle when it is high, and the wrap (28 → 26) loops here while it is low, at no cost. TX keeps running the whole time.
 
+### Full memory image (hex)
+
+These are the 40 16-bit words the testbench loads into `imem` (dumped from the simulation, clock divisor 1). Addresses 0–31 are the program, 32–39 are the config the SM loads at boot (low half first). It is in `$readmemh` format: one word per line, in address order starting at 0, and `//` comments are ignored.
+
+```
+// ---- program (0-31) ----
+E001  // 0   set pins, 1
+E081  // 1   set pindirs, 1
+A02B  // 2   mov x, ~null
+8040  // 3   push iffull noblock
+80C0  // 4   pull ifempty noblock       (idle slot)
+6001  // 5   out pins, 1
+01C4  // 6   jmp pin 4 [1]
+80C0  // 7   pull ifempty noblock       (filler slot)
+6001  // 8   out pins, 1
+E147  // 9   set y, 7 [1]
+80C0  // 10  pull ifempty noblock       (bit loop, slot 1)
+6201  // 11  out pins, 1 [2]
+80C0  // 12  pull ifempty noblock       (slot 2)
+6201  // 13  out pins, 1 [2]
+80C0  // 14  pull ifempty noblock       (slot 3)
+6001  // 15  out pins, 1
+4001  // 16  in pins, 1
+008A  // 17  jmp y-- 10
+80C0  // 18  pull ifempty noblock       (stop bit, slot 1)
+6201  // 19  out pins, 1 [2]
+80C0  // 20  pull ifempty noblock       (slot 2)
+6201  // 21  out pins, 1 [2]
+80C0  // 22  pull ifempty noblock       (slot 3)
+6001  // 23  out pins, 1
+00C3  // 24  jmp pin 3
+C014  // 25  irq 4 rel
+80C0  // 26  pull ifempty noblock       (wait-high slot, wrap bottom)
+6001  // 27  out pins, 1
+01C4  // 28  jmp pin 4 [1]              (wrap top)
+001D  // 29  jmp 29                     (unused, never reached)
+001E  // 30  jmp 30                     (unused, never reached)
+001F  // 31  jmp 31                     (unused, never reached)
+// ---- config (32-39), loaded at boot ----
+0000  // 32  CLKDIV[15:0]     FRAC = 0
+0001  // 33  CLKDIV[31:16]    INT = 1
+CD00  // 34  EXECCTRL[15:0]   WRAP_TOP = 28, WRAP_BOTTOM = 26
+0201  // 35  EXECCTRL[31:16]  JMP_PIN = 2
+0000  // 36  SHIFTCTRL[15:0]
+108C  // 37  SHIFTCTRL[31:16] PULL_THRESH = 8, PUSH_THRESH = 8, OUT/IN shift right
+00C6  // 38  PINCTRL[15:0]    IN_BASE = 2, SET_BASE = 6, OUT_BASE = 6
+0411  // 39  PINCTRL[31:16]   SET_COUNT = 1, OUT_COUNT = 1
+```
+
+Only addresses 32 and 33 change with the clock divisor:
+
+| Divisor | 32 (`CLKDIV[15:0]`) | 33 (`CLKDIV[31:16]`) |
+|---|---|---|
+| 1 | 0000 | 0001 |
+| 3 | 0000 | 0003 |
+| 2.5 | 8000 | 0002 |
+
 ---
 
 ## 4. Testbench pieces
