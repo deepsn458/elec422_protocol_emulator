@@ -21,6 +21,7 @@ module program_counter #(
     input  logic [MEM_ADDR_WIDTH-1:0] branch_addr,
 
     output logic [MEM_ADDR_WIDTH-1:0] pc,      // clocked output
+    output logic [MEM_ADDR_WIDTH-1:0] next_pc, // combinational: the value pc loads on the next edge
     output logic                      read_en  // combinational output
 );
 
@@ -30,15 +31,24 @@ module program_counter #(
 
     assign read_en = rst_n && pc_en;  // read enable active as long as pc is active
 
+    // next_pc lets a synchronous memory be addressed one cycle ahead: give it
+    // next_pc, and after the edge its output is the word at the new pc.
+    always_comb begin
+        if (!rst_n)
+            next_pc = MEM_START_OFFSET;
+        else if (!pc_en)
+            next_pc = pc;
+        else if (branch_en)
+            next_pc = branch_addr;
+        else
+            next_pc = pc + ADDR_INCREMENT;
+    end
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             pc <= MEM_START_OFFSET;
-        else if (pc_en) begin
-            if (branch_en)
-                pc <= branch_addr;
-            else
-                pc <= pc + ADDR_INCREMENT;
-        end
+        else
+            pc <= next_pc;
     end
 
 endmodule

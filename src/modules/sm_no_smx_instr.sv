@@ -9,8 +9,15 @@
 //   * program_counter - the PC register
 //
 // The instruction memory (64 x 16-bit words) lives outside this module:
-//   * mem_addr / read_en / instr: the PC drives the address, memory returns
-//     the word stored there (combinational read).
+//   * mem_addr / read_en / instr: the memory is a synchronous SRAM (the IHP
+//     64x16 macro): it registers mem_addr on a clock edge and outputs that
+//     word after the edge. So mem_addr is the NEXT PC (the value the PC loads
+//     on that same edge), and instr is always the word at the current PC,
+//     with no lost cycles. Holding the PC (stall, delay, disabled, clock
+//     divider) re-reads the same address. During rst, mem_addr is 32 and
+//     read_en is high, so the first config word is ready on the first cycle
+//     after rst falls; rst must be high for at least one clock edge. read_en
+//     is always 1; connect it to the SRAM's A_REN.
 //   * Memory map:
 //       0-31   program
 //       32-33  CLKDIV    [15:0], [31:16]
@@ -59,9 +66,9 @@ module sm_no_smx_instr #(
   input  logic        clkdiv_restart,      // CLKDIV_RESTART, one-cycle pulse
 
   // Instruction memory: program at 0-31, config words at 32-39
-  output logic [5:0]  mem_addr,            // = PC
+  output logic [5:0]  mem_addr,            // next PC (synchronous memory read)
   output logic        read_en,
-  input  logic [15:0] instr,               // memory[mem_addr]
+  input  logic [15:0] instr,               // memory[PC]: registered read of mem_addr
 
   // TX FIFO (host -> SM), first-word fall-through
   input  logic [DATA_WIDTH-1:0] tx_data,   // oldest word, valid when !tx_empty
@@ -273,10 +280,14 @@ module sm_no_smx_instr #(
     .branch_en  (branch_en),
     .branch_addr(branch_addr),
     .pc         (pc),
-    .read_en    (read_en)
+    .next_pc    (mem_addr),
+    .read_en    ()
   );
 
-  assign mem_addr = pc;
+  // Always read, including during rst: the read on the last rst edge is
+  // what puts the first config word (address 32) on instr when rst falls.
+  // (u_pc's read_en is low during rst, which would leave instr stale.)
+  assign read_en = 1'b1;
 
   clockdiv u_clockdiv (
     .clk      (clk),

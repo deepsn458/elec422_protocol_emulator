@@ -25,7 +25,8 @@ module tb_sm_no_smx_instr;
     reg sm_rst;
     reg booted;
 
-    wire [5:0] pc;
+    wire [5:0] mem_addr;               // next PC, to the synchronous memory
+    wire [5:0] pc = dut.pc;            // the current PC, for checks
     wire [15:0] instr;
     wire read_en;
     wire [W-1:0] tx_data;
@@ -51,7 +52,7 @@ module tb_sm_no_smx_instr;
         .en(en),
         .restart(restart),
         .clkdiv_restart(clkdiv_restart),
-        .mem_addr(pc),
+        .mem_addr(mem_addr),
         .read_en(read_en),
         .instr(instr),
         .tx_data(tx_data),
@@ -76,9 +77,15 @@ module tb_sm_no_smx_instr;
     // Models of the blocks around the state machine
     // ------------------------------------------------------------------------
 
-    // Instruction memory, combinational read. 0-31 program, 32-39 config.
+    // Instruction memory with a synchronous read, like the IHP SRAM: the
+    // address is registered on the clock edge and the word comes out after
+    // it. 0-31 program, 32-39 config.
     reg [15:0] imem [0:63];
-    assign instr = imem[pc];
+    reg [15:0] instr_q;
+    always @(posedge clk)
+        if (read_en)
+            instr_q <= imem[mem_addr];
+    assign instr = instr_q;
 
     // 4-deep first-word fall-through TX FIFO, written by the host.
     reg [W-1:0] txf [0:3];

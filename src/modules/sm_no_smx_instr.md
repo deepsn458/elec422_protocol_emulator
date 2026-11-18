@@ -30,7 +30,7 @@ The file is organised in the order below; each heading matches a `// ---` sectio
 |---|---|---|
 | Clock/reset | `clk`, `rst` | `rst` is synchronous, active high |
 | CTRL register | `en`, `restart`, `clkdiv_restart` | `restart` and `clkdiv_restart` are one-cycle pulses |
-| Instruction memory | `mem_addr` (6 bits), `read_en` out; `instr` in | Program at 0–31, config words at 32–39. See section 1a and section 9 |
+| Instruction memory | `mem_addr` (6 bits), `read_en` out; `instr` in | Synchronous read (IHP SRAM): `mem_addr` is the **next** PC, `instr` is the word at the current PC. `read_en` is always 1. Program at 0–31, config words at 32–39. See sections 1a, 1b and 9 |
 | TX FIFO | `tx_data`, `tx_empty`, `tx_level` in; `tx_pop` out | `tx_data` must be valid *before* the pop (first-word fall-through) |
 | RX FIFO | `rx_full`, `rx_level` in; `rx_data`, `rx_push` out | |
 | GPIO | `gpio_in` in; `pins_we/wdata`, `dirs_we/wdata` out | Write masks + data, one bit per GPIO |
@@ -66,6 +66,26 @@ During boot, `booting = pc[5]` is high:
 Rules:
 - **Only `rst` boots.** `restart` (SM_RESTART) keeps the loaded config. To change config, write new words to 32–39 and reset the SM.
 - **Programs live in 0–31.** JMP targets, OUT PC, MOV PC, WRAP_TOP and WRAP_BOTTOM are all 5 bits. When a completed instruction at 31 doesn't jump or wrap, the PC goes to 0, not into the config words.
+
+## 1b. Instruction fetch from a synchronous SRAM
+
+The IHP SRAM (`RM_IHPSG13_1P_64x16_c2`) registers its address on a clock edge and outputs that word after the edge. To get no lost cycles, the SM addresses it **one cycle ahead**:
+
+- `mem_addr` is `u_pc.next_pc`, the value the PC loads on the next edge. On that edge, the PC and the SRAM's output both move to the new address, so `instr` is always the word at the current PC.
+- Holding the PC (stall, delay, disabled, waiting for a clock-divider tick) keeps `next_pc` = `pc`, so the SRAM re-reads the same word.
+- During `rst`, `next_pc` is 32 and `read_en` is 1, so the read on the last `rst` edge puts the first config word on `instr` when `rst` falls. `rst` must be high for at least one clock edge.
+- `read_en` is tied to 1 (connect it to `A_REN`). The PC module's own `read_en` is low during reset, which would leave `instr` stale on the first boot cycle.
+
+```
+cycle:     |  rst  |  boot0  |  boot1  | ... |  boot7  |  prog0  |
+pc:           32       32        33            39         0
+mem_addr:     32       33        34            0          1 (or jump target)
+instr:        --     mem[32]   mem[33]       mem[39]    mem[0]
+```
+
+Timing cost: the path SRAM output → decode → next PC → SRAM address input must fit in one clock period (plus the SRAM's address setup time). Check it in synthesis.
+
+Wiring to the IHP macro: `A_CLK = clk`, `A_ADDR = mem_addr`, `A_REN = read_en`, `A_MEN = 1`, `A_DLY = 1`, `instr = A_DOUT`. When the host writes the SRAM (`A_WEN`), hold the SM in `rst` and mux the host's address onto `A_ADDR`.
 
 ## 2. Helpers
 
@@ -297,7 +317,7 @@ gpio_out <= (gpio_out & ~pins_we) | (pins_wdata & pins_we);
 
 ## 9. Program counter control
 
-The PC is `program_counter.sv`, instantiated inside the SM as `u_pc` (6-bit address, increment 1, reset to 32). Its `pc` drives `mem_addr`, and its `read_en` goes straight out. The SM tells it what to do next through the internal `branch_en`/`branch_addr`:
+The PC is `program_counter.sv`, instantiated inside the SM as `u_pc` (6-bit address, increment 1, reset to 32). Its `next_pc` drives `mem_addr` (section 1b), and the SM drives `read_en` high itself. The SM tells it what to do next through the internal `branch_en`/`branch_addr`:
 
 | This cycle | `branch_en` | `branch_addr` |
 |---|---|---|
@@ -309,7 +329,7 @@ The PC is `program_counter.sv`, instantiated inside the SM as `u_pc` (6-bit addr
 | Completed instruction, otherwise | 0 | `pc + 1` |
 | Anything else: stalled, delay cycle, no tick, disabled | 1 | `pc` (hold) |
 
-Holding works by "branching to the current address", so the PC only needs a load and an increment. `branch_addr` is **always** the next PC, which also makes it a good address for a synchronous-read instruction memory.
+Holding works by "branching to the current address", so the PC only needs a load and an increment. `branch_addr` is **always** the next PC, and `next_pc` (which is `branch_addr` when `branch_en` is 1, else `pc + 1`) is what addresses the SRAM.
 
 `pc_en` is tied high, since holds are done with branches. `rst_n` is `!rst`; note the PC's reset is asynchronous while the rest of the SM resets synchronously.
 
@@ -336,6 +356,6 @@ The `always_ff @(posedge clk)` block holds the SM's own state:
 - **FIFO:** `tx_data` must show the oldest word while `tx_empty` is 0. The current `fifo.sv` outputs data one cycle *after* `r_en` and keeps `full`/`empty` internal. It needs a fall-through output plus `full`, `empty` and level ports.
 - **Timing:** the regfile's write path has half a clock period (rising edge to falling edge). Testbench inputs should change just after the rising edge, not at the falling edge.
 - **X and Y have no reset.** Programs must initialise them (there is no forced-instruction path for the host to do it).
-- **Memory:** the SM assumes a combinational read (`instr` = memory[`mem_addr`] in the same cycle), both for boot and for the program. The IHP SRAM reads synchronously, so the top level needs to handle that latency.
+- **Memory:** the SM expects a synchronous read, like the IHP SRAM (section 1b). A memory with a combinational read would need `mem_addr` registered first.
 - **Loading:** the host writes the program to 0–31 and the config to 32–39, then releases the SM's reset. The SM is ready to run 8 cycles later.
 - **Tests:** run `make sim_tb_sm_no_smx_instr` from `test/`. `test/modules/tb_sm_no_smx_instr.sv` runs small PIO programs against this module. `test_boot` covers the boot sequence. The testbench gives the SM its own reset (`sm_rst`), and `start()` boots it with the config the test set.

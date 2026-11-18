@@ -52,7 +52,8 @@ module tb_sm_uart;
     reg en;
     reg [31:0] clkdiv, execctrl, shiftctrl, pinctrl;
 
-    wire [5:0] pc;
+    wire [5:0] mem_addr;                // next PC, to the synchronous memory
+    wire [5:0] pc = dut.pc;             // the current PC, for checks
     wire read_en;
     wire [W-1:0] tx_data;
     wire tx_empty;
@@ -67,9 +68,15 @@ module tb_sm_uart;
     reg [7:0] irq_flags;
     wire [7:0] irq_set, irq_clr;
 
-    // Instruction memory, combinational read. 0-31 hold the program, 32-39
-    // the config words the SM loads at boot (see reset_all).
+    // Instruction memory with a synchronous read, like the IHP SRAM: the
+    // address is registered on the clock edge and the word comes out after
+    // it. 0-31 hold the program, 32-39 the config words the SM loads at boot
+    // (see reset_all).
     reg [15:0] imem [0:63];
+    reg [15:0] instr;
+    always @(posedge clk)
+        if (read_en)
+            instr <= imem[mem_addr];
 
     sm_no_smx_instr #(.SM_ID(SM_ID), .DATA_WIDTH(W)) dut (
         .clk(clk),
@@ -77,9 +84,9 @@ module tb_sm_uart;
         .en(en),
         .restart(1'b0),
         .clkdiv_restart(1'b0),
-        .mem_addr(pc),
+        .mem_addr(mem_addr),
         .read_en(read_en),
-        .instr(imem[pc]),
+        .instr(instr),
         .tx_data(tx_data),
         .tx_empty(tx_empty),
         .tx_level(tx_level),

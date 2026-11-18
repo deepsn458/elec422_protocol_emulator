@@ -28,7 +28,7 @@ Icarus prints a few `sorry: constant selects in always_* processes` notices for 
 +---------+  instr                         |                   |
 |  imem   | -----------------------------> |                   |
 | 64 x 16 | <----------------------------- |                   |
-+---------+  mem_addr (pc)                 |                   |
++---------+  mem_addr (next PC)            |                   |
                                            |                   |   pins_we/wdata, dirs_we/wdata
 +---------+  rx_data, rx_push              |                   | ------------------+
 | RX FIFO | <----------------------------- |                   |                   |
@@ -261,7 +261,7 @@ Only addresses 32 and 33 change with the clock divisor:
 
 | Model | What it does |
 |---|---|
-| `imem` | 64 × 16-bit instruction memory, combinational read: `instr = imem[pc]` |
+| `imem` | 64 × 16-bit instruction memory with a synchronous read, like the IHP SRAM: `instr <= imem[mem_addr]` on each clock edge (when `read_en`). `mem_addr` is the SM's next PC, so `instr` is the word at the current PC (`dut.pc`) |
 | TX FIFO | 4 deep, first-word fall-through, written by `tx_put()` |
 | RX FIFO | 4 deep, read by `rx_get()` |
 | IRQ flags | 8 flags, set by the SM, cleared by the SM or the host (write 1 to clear) |
