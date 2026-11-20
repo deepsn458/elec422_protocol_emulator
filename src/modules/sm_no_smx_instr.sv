@@ -58,12 +58,14 @@ module sm_no_smx_instr #(
   parameter int DATA_WIDTH = 16
 ) (
   input  logic        clk,
-  input  logic        rst,                 // synchronous, active high
+  input  logic        external_rst,                 // synchronous, active high
 
   // CTRL register
   input  logic        en,                  // SM_ENABLE
   input  logic        restart,             // SM_RESTART, one-cycle pulse
   input  logic        clkdiv_restart,      // CLKDIV_RESTART, one-cycle pulse
+
+  input logic imem_loaded,                 // signal from SPI SLAVE, latched signal
 
   // Instruction memory: program at 0-31, config words at 32-39
   output logic [5:0]  mem_addr,            // next PC (synchronous memory read)
@@ -172,6 +174,15 @@ module sm_no_smx_instr #(
   function automatic logic [CW-1:0] count32(input logic [4:0] n);
     return (n == 5'd0) ? FULL : clampw({1'b0, n});
   endfunction
+
+  //Reset logic: hold the sm in reset for an extra cycle after loaded is
+  //asserted so the sramr reads from addr 32 one cycle after reset is cleared
+  logic loaded_q;
+  logic rst;
+  assign rst = external_rst || !loaded_q;
+
+  always_ff @ (posedge clk)
+      loaded_q <= loaded;
 
   // ---------------------------------------------------------------------------
   // Configuration registers, loaded from memory 32-39 at boot
