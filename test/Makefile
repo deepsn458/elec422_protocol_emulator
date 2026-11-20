@@ -70,6 +70,12 @@ $(SIM_OUTPUTS)/integration/sv/%.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_%.sv $(RTL_LI
 	mkdir -p $(@D)
 	iverilog -g2012 -DSV_TEST -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/integration/sv/$*.$(WAVEFORM_EXT)\" $(RTL_LIB_ARGS) -s tb_$* -o $@ $<
 
+# The program-load test uses the IHP SRAM functional model, which is not in
+# the library directories and needs FUNCTIONAL defined.
+$(SIM_OUTPUTS)/integration/sv/spi_imem_sm.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_spi_imem_sm.sv $(RTL_LIB_SOURCES) $(SRAM_MODEL_SOURCES)
+	mkdir -p $(@D)
+	iverilog -g2012 -DSV_TEST -DFUNCTIONAL -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/integration/sv/spi_imem_sm.$(WAVEFORM_EXT)\" $(RTL_LIB_ARGS) -s tb_spi_imem_sm -o $@ $< $(SRAM_MODEL_SOURCES)
+
 $(INT_COCOTB_TARGETS): cocotb_int_%:
 	$(MAKE) --no-print-directory FLOW=cocotb INTEGRATION_NAME=$* sim
 	test -f $(SIM_OUTPUTS)/integration/cocotb/$*/results.xml

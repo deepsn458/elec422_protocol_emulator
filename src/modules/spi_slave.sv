@@ -39,7 +39,7 @@
 module spi_slave #(
     parameter DATA_WIDTH  = 16,
     parameter IMEM_XFER_CNT = 40,
-    parameter IMEM_XFER_BITS = $clog(IMEM_XFER_CNT),
+    parameter IMEM_XFER_BITS = $clog2(IMEM_XFER_CNT),
     parameter SYNC_STAGES = 2,
     parameter CNT_BITS    = $clog2(DATA_WIDTH)
     )(
@@ -57,7 +57,7 @@ module spi_slave #(
   input  logic [DATA_WIDTH-1:0] tx_data,   // word sent on miso
   output logic [DATA_WIDTH-1:0] rx_data,   // last complete word received on mosi
   output logic                  rx_valid,   // one-cycle pulse when rx_data updates
-  output logic [IMEM_XFER_BITS-1: 0] loaded // latched after the first 40 words have been transfered
+  output logic                  loaded   // latched after the first 40 words have been transfered
 );
 
   localparam logic [CNT_BITS-1:0] LAST_BIT = CNT_BITS'(DATA_WIDTH - 1);
@@ -67,7 +67,7 @@ module spi_slave #(
   // ---------------------------------------------------------------------------
   logic [SYNC_STAGES-1:0] sclk_sync, cs_n_sync, mosi_sync;
 
-  logic [CNT_BITS-1:0] xfer_counter;
+  logic [IMEM_XFER_BITS-1:0] xfer_counter;  // words received, 0..IMEM_XFER_CNT-1
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -149,17 +149,19 @@ module spi_slave #(
     end
   end
 
-  //transfer counter
+  // Transfer counter. Counts on rx_valid (the cycle the word is on rx_data),
+  // not word_done: loaded must rise on the edge that writes the last word,
+  // so that word is still steered to instruction memory.
   always_ff @ (posedge clk) begin
       if (rst) begin
           loaded <= '0;
           xfer_counter <= '0;
-      end else begin
-          if (word_done && xfer_counter == IMEM_XFER_CNT-1) begin
+      end else if (rx_valid && !loaded) begin
+          if (xfer_counter == IMEM_XFER_BITS'(IMEM_XFER_CNT-1)) begin
               loaded <= 1'b1; //latched permanently
               xfer_counter <= '0;
-          end else if (word_done)
-              xfer_counter <= xfer_counter + 1;
+          end else
+              xfer_counter <= xfer_counter + 1'b1;
       end
   end
 

@@ -182,7 +182,7 @@ module sm_no_smx_instr #(
   assign rst = external_rst || !loaded_q;
 
   always_ff @ (posedge clk)
-      loaded_q <= loaded;
+      loaded_q <= imem_loaded;
 
   // ---------------------------------------------------------------------------
   // Configuration registers, loaded from memory 32-39 at boot
