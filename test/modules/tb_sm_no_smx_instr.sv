@@ -50,7 +50,8 @@ module tb_sm_no_smx_instr;
 
     sm_no_smx_instr #(.SM_ID(SM_ID), .DATA_WIDTH(W)) dut (
         .clk(clk),
-        .rst(sm_rst),
+        .external_rst(sm_rst),
+        .imem_loaded(1'b1),               // memory is preloaded by the tb
         .en(en),
         .restart(restart),
         .clkdiv_restart(clkdiv_restart),

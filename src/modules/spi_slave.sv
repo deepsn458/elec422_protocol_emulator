@@ -23,6 +23,12 @@
 //     back-to-back words the host must put the next word on tx_data before
 //     the current word ends. A transfer cut short by cs_n rising is discarded.
 //   * cpol and cpha must only change while cs_n is high.
+//   * Also counts the number of words received and asserts a loaded signal
+//     once 40 words have been transferred (32 instructions + 8 config words)
+//     Used to switch the write enables of the Instruction memory and the rx
+//     fifo and pull the state machine out of reset once the instruction
+//     memory has been loaded
+//
 //
 // Timing: the synchronizer and edge detector add SYNC_STAGES + 1 clk cycles
 // of latency, and both sclk phases must last long enough to be seen. Keep
@@ -32,6 +38,8 @@
 
 module spi_slave #(
     parameter DATA_WIDTH  = 16,
+    parameter IMEM_XFER_CNT = 40,
+    parameter IMEM_XFER_BITS = $clog2(IMEM_XFER_CNT),
     parameter SYNC_STAGES = 2,
     parameter CNT_BITS    = $clog2(DATA_WIDTH)
     )(
@@ -48,7 +56,8 @@ module spi_slave #(
   // Host side
   input  logic [DATA_WIDTH-1:0] tx_data,   // word sent on miso
   output logic [DATA_WIDTH-1:0] rx_data,   // last complete word received on mosi
-  output logic                  rx_valid   // one-cycle pulse when rx_data updates
+  output logic                  rx_valid,   // one-cycle pulse when rx_data updates
+  output logic                  loaded   // latched after the first 40 words have been transfered
 );
 
   localparam logic [CNT_BITS-1:0] LAST_BIT = CNT_BITS'(DATA_WIDTH - 1);
@@ -57,6 +66,8 @@ module spi_slave #(
   // Synchronizers: [0] is the first (metastable) stage, [SYNC_STAGES-1] is safe.
   // ---------------------------------------------------------------------------
   logic [SYNC_STAGES-1:0] sclk_sync, cs_n_sync, mosi_sync;
+
+  logic [IMEM_XFER_BITS-1:0] xfer_counter;  // words received, 0..IMEM_XFER_CNT-1
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -136,6 +147,22 @@ module spi_slave #(
         end
       end
     end
+  end
+
+  // Transfer counter. Counts on rx_valid (the cycle the word is on rx_data),
+  // not word_done: loaded must rise on the edge that writes the last word,
+  // so that word is still steered to instruction memory.
+  always_ff @ (posedge clk) begin
+      if (rst) begin
+          loaded <= '0;
+          xfer_counter <= '0;
+      end else if (rx_valid && !loaded) begin
+          if (xfer_counter == IMEM_XFER_BITS'(IMEM_XFER_CNT-1)) begin
+              loaded <= 1'b1; //latched permanently
+              xfer_counter <= '0;
+          end else
+              xfer_counter <= xfer_counter + 1'b1;
+      end
   end
 
   assign miso    = tx_sr[DATA_WIDTH-1];
