@@ -1,0 +1,51 @@
+; Full-duplex UART from tb_sm_uart.sv, using the divide-by-1 configuration.
+.program tb_sm_uart
+.set_clkdiv    0x00010000
+.set_execctrl  0x0201CD00       ; JMP_PIN = GPIO 2, wrap 28 -> 26
+.set_shiftctrl 0x108C0000       ; 8-bit thresholds, shift right
+.set_pinctrl   0x041100C6       ; TX = GPIO 6, RX = GPIO 2
+
+    set pins, 1
+    set pindirs, 1
+    mov x, ~null
+push_byte:
+    push iffull noblock
+idle:
+    pull ifempty noblock
+    out pins, 1
+    jmp pin idle [1]
+
+    ; Start bit detected. Set up the receive bit counter.
+    pull ifempty noblock
+    out pins, 1
+    set y, 7 [1]
+bitloop:
+    pull ifempty noblock
+    out pins, 1 [2]
+    pull ifempty noblock
+    out pins, 1 [2]
+    pull ifempty noblock
+    out pins, 1
+    in pins, 1
+    jmp y--, bitloop
+
+    ; Check the stop bit and flag a framing error if it is low.
+    pull ifempty noblock
+    out pins, 1 [2]
+    pull ifempty noblock
+    out pins, 1 [2]
+    pull ifempty noblock
+    out pins, 1
+    jmp pin push_byte
+    irq 4 rel
+
+.wrap_target
+    pull ifempty noblock
+    out pins, 1
+    jmp pin idle [1]
+.wrap
+
+    ; Match the testbench's self-jumps in slots 29 through 31.
+    jmp 29
+    jmp 30
+    jmp 31

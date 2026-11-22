@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Check that the PIO assembler produces the programs in tb_sm_no_smx_instr.sv.
+"""Check that the PIO assembler reproduces the state machine testbench programs.
 
     python3 test/integration/assembler_test.py
 
-For every program loaded by the testbench tasks test_set_and_wrap through
-test_pins_re, this script:
+For every program loaded by test_set_and_wrap through test_pins_re in
+tb_sm_no_smx_instr.sv, plus the full-duplex program in tb_sm_uart.sv, this script:
 
-1. writes a golden hex image built from the testbench's own encoders
+1. writes a golden hex image based on the corresponding testbench
    (assembler_test_outputs/golden/<name>.hex),
 2. assembles the matching hand-written source pio_programs/<name>.pio with
    src/assembler/pio_assembler.py (assembler_test_outputs/generated/<name>.hex),
@@ -19,6 +19,7 @@ followed by CLKDIV, EXECCTRL, SHIFTCTRL and PINCTRL, low halfword first, as in
 write_cfg(). The golden images can be loaded into a testbench with $readmemh.
 
 The exit status is 1 if any program FAILs or XPASSes, otherwise 0.
+programs.txt lists the cases in run order.
 """
 
 import subprocess
@@ -30,6 +31,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 ASSEMBLER = REPO / "src" / "assembler" / "pio_assembler.py"
 SOURCES = HERE / "pio_programs"
+MANIFEST = HERE / "programs.txt"
 OUTPUTS = HERE / "assembler_test_outputs"
 GOLDEN = OUTPUTS / "golden"
 GENERATED = OUTPUTS / "generated"
@@ -37,9 +39,6 @@ LOG = OUTPUTS / "assembler_test.log"
 
 SLOTS = 32
 CONFIG_NAMES = ("CLKDIV", "EXECCTRL", "SHIFTCTRL", "PINCTRL")
-
-# The assembler emits NOP for IRQ because IRQ is reserved for now.
-IRQ_XFAIL = "assembler emits NOP for IRQ (reserved)"
 
 # ----------------------------------------------------------------------------
 # Instruction and config encoders, copied from tb_sm_no_smx_instr.sv
@@ -125,15 +124,12 @@ PINCTRL = 0x1400_0000
 
 
 @dataclass
-class Program:
-    name: str
-    description: str
+class GoldenProgram:
     imem: dict                  # address -> word; other slots are NOP
     clkdiv: int = CLKDIV
     execctrl: int = EXECCTRL
     shiftctrl: int = SHIFTCTRL
     pinctrl: int = PINCTRL
-    xfail: str = ""             # reason the assembler is expected to differ
     config: tuple = field(init=False)
 
     def __post_init__(self):
@@ -145,212 +141,225 @@ def words(*ws):
     return dict(enumerate(ws))
 
 
-def programs():
-    p = []
+def golden_programs():
+    images = {}
+
+    def add(name, imem, **config):
+        images[name] = GoldenProgram(imem, **config)
 
     # test_set_and_wrap: squarewave_fast, wrap 2 -> 1, SET on GPIO 3.
     square = words(i_set(S_PINDIRS, 1), i_set(S_PINS, 1), i_set(S_PINS, 0))
     square_exec = execctrl_f(0, 0, 0, 2, 1, 0, 0)
     square_pins = pinctrl_f(0, 1, 0, 0, 0, 3, 0)
-    p.append(Program("test_set_and_wrap", "squarewave_fast, wrap 2 -> 1", square,
-                     execctrl=square_exec, pinctrl=square_pins))
+    add("test_set_and_wrap", square,
+        execctrl=square_exec, pinctrl=square_pins)
 
     # test_delay: squarewave with one delay cycle per level.
-    p.append(Program("test_delay", "squarewave_wrap with [1] delays",
-                     words(i_set(S_PINDIRS, 1), dss(i_set(S_PINS, 1), 1),
-                           dss(i_set(S_PINS, 0), 1)),
-                     execctrl=square_exec, pinctrl=square_pins))
+    add("test_delay",
+        words(i_set(S_PINDIRS, 1), dss(i_set(S_PINS, 1), 1),
+              dss(i_set(S_PINS, 0), 1)),
+        execctrl=square_exec, pinctrl=square_pins)
 
     # test_clock_divider_and_enable
-    p.append(Program("test_clock_divider_and_enable_0", "squarewave, divide by 3", square,
-                     clkdiv=(3 << 16), execctrl=square_exec, pinctrl=square_pins))
-    p.append(Program("test_clock_divider_and_enable_1", "jmp ping-pong, divide by 2.5",
-                     words(i_jmp(C_ALWAYS, 1), i_jmp(C_ALWAYS, 0)),
-                     clkdiv=(2 << 16) | (0x80 << 8)))
+    add("test_clock_divider_and_enable_0", square,
+        clkdiv=(3 << 16), execctrl=square_exec, pinctrl=square_pins)
+    add("test_clock_divider_and_enable_1",
+        words(i_jmp(C_ALWAYS, 1), i_jmp(C_ALWAYS, 0)),
+        clkdiv=(2 << 16) | (0x80 << 8))
 
     # test_jmp_conditions: check_jmp(cond, taken, s0, s1, s2, what).
     pin9 = execctrl_f(0, 0, 9, 31, 0, 0, 0)
     osre8 = shiftctrl_f(8, 0, 1, 1, 0, 0)
     jmp_cases = [
-        (C_ALWAYS, NOP, NOP, NOP, "jmp always", dict(execctrl=pin9)),
-        (C_NOT_X, i_set(S_X, 0), NOP, NOP, "jmp !x, x = 0", {}),
-        (C_NOT_X, i_set(S_X, 1), NOP, NOP, "jmp !x, x = 1", {}),
-        (C_X_DEC, i_set(S_X, 1), NOP, NOP, "jmp x--, x = 1", {}),
-        (C_X_DEC, i_set(S_X, 0), NOP, NOP, "jmp x--, x = 0", {}),
-        (C_NOT_Y, i_set(S_Y, 0), NOP, NOP, "jmp !y, y = 0", {}),
-        (C_NOT_Y, i_set(S_Y, 7), NOP, NOP, "jmp !y, y = 7", {}),
-        (C_Y_DEC, i_set(S_Y, 2), NOP, NOP, "jmp y--, y = 2", {}),
-        (C_Y_DEC, i_set(S_Y, 0), NOP, NOP, "jmp y--, y = 0", {}),
-        (C_X_NE_Y, i_set(S_X, 3), i_set(S_Y, 3), NOP, "jmp x!=y, equal", {}),
-        (C_X_NE_Y, i_set(S_X, 3), i_set(S_Y, 4), NOP, "jmp x!=y, different", {}),
-        (C_PIN, NOP, NOP, NOP, "jmp pin, pin high", dict(execctrl=pin9)),
-        (C_PIN, NOP, NOP, NOP, "jmp pin, pin low", dict(execctrl=pin9)),
-        (C_NOT_OSRE, NOP, NOP, NOP, "jmp !osre, empty", {}),
-        (C_NOT_OSRE, i_pull(0, 1), NOP, NOP, "jmp !osre, after pull", {}),
-        (C_NOT_OSRE, i_pull(0, 1), i_out(O_NULL, 4), NOP, "jmp !osre, 4 of 8 bits out",
+        (C_ALWAYS, NOP, NOP, NOP, dict(execctrl=pin9)),
+        (C_NOT_X, i_set(S_X, 0), NOP, NOP, {}),
+        (C_NOT_X, i_set(S_X, 1), NOP, NOP, {}),
+        (C_X_DEC, i_set(S_X, 1), NOP, NOP, {}),
+        (C_X_DEC, i_set(S_X, 0), NOP, NOP, {}),
+        (C_NOT_Y, i_set(S_Y, 0), NOP, NOP, {}),
+        (C_NOT_Y, i_set(S_Y, 7), NOP, NOP, {}),
+        (C_Y_DEC, i_set(S_Y, 2), NOP, NOP, {}),
+        (C_Y_DEC, i_set(S_Y, 0), NOP, NOP, {}),
+        (C_X_NE_Y, i_set(S_X, 3), i_set(S_Y, 3), NOP, {}),
+        (C_X_NE_Y, i_set(S_X, 3), i_set(S_Y, 4), NOP, {}),
+        (C_PIN, NOP, NOP, NOP, dict(execctrl=pin9)),
+        (C_PIN, NOP, NOP, NOP, dict(execctrl=pin9)),
+        (C_NOT_OSRE, NOP, NOP, NOP, {}),
+        (C_NOT_OSRE, i_pull(0, 1), NOP, NOP, {}),
+        (C_NOT_OSRE, i_pull(0, 1), i_out(O_NULL, 4), NOP,
          dict(shiftctrl=osre8)),
-        (C_NOT_OSRE, i_pull(0, 1), i_out(O_NULL, 8), NOP, "jmp !osre, 8 of 8 bits out",
+        (C_NOT_OSRE, i_pull(0, 1), i_out(O_NULL, 8), NOP,
          dict(shiftctrl=osre8)),
     ]
-    for n, (cond, s0, s1, s2, what, cfg) in enumerate(jmp_cases):
+    for n, (cond, s0, s1, s2, cfg) in enumerate(jmp_cases):
         imem = {0: s0, 1: s1, 2: s2, 3: i_jmp(cond, 10),
                 4: i_jmp(C_ALWAYS, 4), 10: i_jmp(C_ALWAYS, 10)}
-        p.append(Program(f"test_jmp_conditions_{n}", what, imem, **cfg))
+        add(f"test_jmp_conditions_{n}", imem, **cfg)
 
     # test_jmp_x_dec_loop
-    p.append(Program("test_jmp_x_dec_loop", "x-- loop",
-                     words(i_set(S_X, 3), i_jmp(C_X_DEC, 1), i_jmp(C_ALWAYS, 2))))
+    add("test_jmp_x_dec_loop",
+        words(i_set(S_X, 3), i_jmp(C_X_DEC, 1), i_jmp(C_ALWAYS, 2)))
 
     # test_autopull_autopush_loopback
-    p.append(Program("test_autopull_autopush_loopback", "out x / in x, wrap 1 -> 0",
-                     words(i_out(O_X, 16), i_in(IN_X, 16)),
-                     execctrl=execctrl_f(0, 0, 0, 1, 0, 0, 0),
-                     shiftctrl=shiftctrl_f(0, 0, 1, 1, 1, 1)))
+    add("test_autopull_autopush_loopback",
+        words(i_out(O_X, 16), i_in(IN_X, 16)),
+        execctrl=execctrl_f(0, 0, 0, 1, 0, 0, 0),
+        shiftctrl=shiftctrl_f(0, 0, 1, 1, 1, 1))
 
     # test_shift_and_pin_instructions: dir 0 = OUT right, IN left; dir 1 = reverse.
     shift_prog = words(i_set(S_PINDIRS, 0xF), i_pull(0, 1), i_out(O_PINS, 4),
-                       i_in(IN_PINS, 4), i_out(O_PINS, 4), i_in(IN_PINS, 4),
-                       i_push(0, 1), i_jmp(C_ALWAYS, 7))
+            i_in(IN_PINS, 4), i_out(O_PINS, 4), i_in(IN_PINS, 4),
+            i_push(0, 1), i_jmp(C_ALWAYS, 7))
     shift_pins = pinctrl_f(0, 4, 4, 8, 0, 8, 8)
-    p.append(Program("test_shift_and_pin_instructions_0", "OUT right, IN left", shift_prog,
-                     shiftctrl=shiftctrl_f(0, 0, 1, 0, 0, 0), pinctrl=shift_pins))
-    p.append(Program("test_shift_and_pin_instructions_1", "OUT left, IN right", shift_prog,
-                     shiftctrl=shiftctrl_f(0, 0, 0, 1, 0, 0), pinctrl=shift_pins))
+    add("test_shift_and_pin_instructions_0", shift_prog,
+        shiftctrl=shiftctrl_f(0, 0, 1, 0, 0, 0), pinctrl=shift_pins)
+    add("test_shift_and_pin_instructions_1", shift_prog,
+        shiftctrl=shiftctrl_f(0, 0, 0, 1, 0, 0), pinctrl=shift_pins)
 
     # test_pull_blocking
-    p.append(Program("test_pull_blocking", "pull noblock copies x, pull block stalls",
-                     words(i_set(S_X, 28), i_pull(0, 0), i_mov(MD_Y, MOP_NONE, MS_OSR),
-                           i_pull(0, 1), i_jmp(C_ALWAYS, 4))))
+    add("test_pull_blocking",
+        words(i_set(S_X, 28), i_pull(0, 0), i_mov(MD_Y, MOP_NONE, MS_OSR),
+              i_pull(0, 1), i_jmp(C_ALWAYS, 4)))
 
     # test_push_blocking
-    p.append(Program("test_push_blocking", "push noblock drops, push block stalls",
-                     words(i_set(S_X, 9), i_in(IN_X, 32), i_push(0, 0), i_in(IN_X, 32),
-                           i_push(0, 1), i_jmp(C_ALWAYS, 5))))
+    add("test_push_blocking",
+        words(i_set(S_X, 9), i_in(IN_X, 32), i_push(0, 0), i_in(IN_X, 32),
+              i_push(0, 1), i_jmp(C_ALWAYS, 5)))
 
     # test_pull_push_thresholds
-    p.append(Program("test_pull_push_thresholds", "pull ifempty / push iffull, thresholds 8",
-                     words(i_pull(0, 1), i_out(O_NULL, 4), i_pull(1, 1), i_out(O_NULL, 4),
-                           i_pull(1, 1), i_set(S_X, 3), i_in(IN_X, 4), i_push(1, 1),
-                           i_in(IN_X, 4), i_push(1, 1), i_jmp(C_ALWAYS, 10)),
-                     shiftctrl=shiftctrl_f(8, 8, 1, 0, 0, 0)))
+    add("test_pull_push_thresholds",
+        words(i_pull(0, 1), i_out(O_NULL, 4), i_pull(1, 1), i_out(O_NULL, 4),
+              i_pull(1, 1), i_set(S_X, 3), i_in(IN_X, 4), i_push(1, 1),
+              i_in(IN_X, 4), i_push(1, 1), i_jmp(C_ALWAYS, 10)),
+        shiftctrl=shiftctrl_f(8, 8, 1, 0, 0, 0))
 
     # test_pull_with_autopull
     autopull = shiftctrl_f(0, 0, 1, 1, 1, 0)
-    p.append(Program("test_pull_with_autopull_0", "pull is a no-op while the OSR is full",
-                     words(i_pull(0, 1), i_pull(0, 1), i_out(O_X, 32), NOP,
-                           i_jmp(C_ALWAYS, 4)),
-                     shiftctrl=autopull))
-    p.append(Program("test_pull_with_autopull_1", "background autopull",
-                     words(NOP, i_jmp(C_ALWAYS, 1)), shiftctrl=autopull))
+    add("test_pull_with_autopull_0",
+        words(i_pull(0, 1), i_pull(0, 1), i_out(O_X, 32), NOP,
+              i_jmp(C_ALWAYS, 4)),
+        shiftctrl=autopull)
+    add("test_pull_with_autopull_1",
+        words(NOP, i_jmp(C_ALWAYS, 1)), shiftctrl=autopull)
 
     # test_mov
-    p.append(Program("test_mov_0", "mov operations, sources and destinations",
-                     words(i_set(S_X, 1), i_mov(MD_Y, MOP_REV, MS_X),
-                           i_mov(MD_ISR, MOP_INV, MS_Y), i_mov(MD_OSR, MOP_INV, MS_NULL),
-                           i_mov(MD_X, MOP_NONE, MS_ISR), i_mov(MD_PINS, MOP_NONE, MS_X),
-                           i_mov(MD_Y, MOP_NONE, MS_PINS), i_mov(MD_X, MOP_NONE, MS_STATUS),
-                           i_jmp(C_ALWAYS, 8)),
-                     execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 2),
-                     pinctrl=pinctrl_f(0, 0, 8, 12, 0, 0, 8)))
-    p.append(Program("test_mov_1", "mov x, status (TX level < 2)",
-                     words(i_mov(MD_X, MOP_NONE, MS_STATUS), i_jmp(C_ALWAYS, 1)),
-                     execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 2)))
-    p.append(Program("test_mov_2", "mov y, status (RX level < 1)",
-                     words(i_mov(MD_Y, MOP_NONE, MS_STATUS), i_jmp(C_ALWAYS, 1)),
-                     execctrl=execctrl_f(0, 0, 0, 31, 0, 1, 1)))
+    add("test_mov_0",
+        words(i_set(S_X, 1), i_mov(MD_Y, MOP_REV, MS_X),
+              i_mov(MD_ISR, MOP_INV, MS_Y), i_mov(MD_OSR, MOP_INV, MS_NULL),
+              i_mov(MD_X, MOP_NONE, MS_ISR), i_mov(MD_PINS, MOP_NONE, MS_X),
+              i_mov(MD_Y, MOP_NONE, MS_PINS), i_mov(MD_X, MOP_NONE, MS_STATUS),
+              i_jmp(C_ALWAYS, 8)),
+        execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 2),
+        pinctrl=pinctrl_f(0, 0, 8, 12, 0, 0, 8))
+    add("test_mov_1",
+        words(i_mov(MD_X, MOP_NONE, MS_STATUS), i_jmp(C_ALWAYS, 1)),
+        execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 2))
+    add("test_mov_2",
+        words(i_mov(MD_Y, MOP_NONE, MS_STATUS), i_jmp(C_ALWAYS, 1)),
+        execctrl=execctrl_f(0, 0, 0, 31, 0, 1, 1))
 
     # test_sideset
-    p.append(Program("test_sideset_0", "spi_tx_fast, side-set clock",
-                     words(dss(i_out(O_PINS, 1), 0b00000), dss(i_jmp(C_ALWAYS, 0), 0b10000)),
-                     shiftctrl=shiftctrl_f(8, 0, 1, 1, 1, 0),
-                     pinctrl=pinctrl_f(1, 0, 1, 0, 2, 0, 3)))
-    p.append(Program("test_sideset_1", "optional side-set with delays",
-                     words(dss(i_set(S_X, 0), 0b11010), dss(i_set(S_X, 1), 0b00001),
-                           dss(i_set(S_X, 2), 0b10000), i_jmp(C_ALWAYS, 3)),
-                     execctrl=execctrl_f(1, 0, 0, 31, 0, 0, 0),
-                     pinctrl=pinctrl_f(2, 0, 0, 0, 5, 0, 0)))
-    p.append(Program("test_sideset_2", "side-set wins over set",
-                     words(dss(i_set(S_PINS, 1), 0b00000), dss(i_set(S_PINS, 0), 0b10000),
-                           i_jmp(C_ALWAYS, 2)),
-                     pinctrl=pinctrl_f(1, 1, 0, 0, 6, 6, 0)))
-    p.append(Program("test_sideset_3", "side-set to pin directions",
-                     words(dss(i_set(S_PINS, 1), 0b10000), i_jmp(C_ALWAYS, 1)),
-                     execctrl=execctrl_f(0, 1, 0, 31, 0, 0, 0),
-                     pinctrl=pinctrl_f(1, 1, 0, 0, 6, 6, 0)))
+    add("test_sideset_0",
+        words(dss(i_out(O_PINS, 1), 0b00000), dss(i_jmp(C_ALWAYS, 0), 0b10000)),
+        shiftctrl=shiftctrl_f(8, 0, 1, 1, 1, 0),
+        pinctrl=pinctrl_f(1, 0, 1, 0, 2, 0, 3))
+    add("test_sideset_1",
+        words(dss(i_set(S_X, 0), 0b11010), dss(i_set(S_X, 1), 0b00001),
+              dss(i_set(S_X, 2), 0b10000), i_jmp(C_ALWAYS, 3)),
+        execctrl=execctrl_f(1, 0, 0, 31, 0, 0, 0),
+        pinctrl=pinctrl_f(2, 0, 0, 0, 5, 0, 0))
+    add("test_sideset_2",
+        words(dss(i_set(S_PINS, 1), 0b00000), dss(i_set(S_PINS, 0), 0b10000),
+              i_jmp(C_ALWAYS, 2)),
+        pinctrl=pinctrl_f(1, 1, 0, 0, 6, 6, 0))
+    add("test_sideset_3",
+        words(dss(i_set(S_PINS, 1), 0b10000), i_jmp(C_ALWAYS, 1)),
+        execctrl=execctrl_f(0, 1, 0, 31, 0, 0, 0),
+        pinctrl=pinctrl_f(1, 1, 0, 0, 6, 6, 0))
 
     # test_wait
-    p.append(Program("test_wait_0", "wait gpio with delay",
-                     words(dss(i_wait(1, W_GPIO, 14), 2), i_set(S_PINS, 1), i_jmp(C_ALWAYS, 2)),
-                     pinctrl=pinctrl_f(0, 1, 0, 0, 0, 0, 0)))
-    p.append(Program("test_wait_1", "wait pin uses IN_BASE",
-                     words(i_wait(0, W_PIN, 3), i_jmp(C_ALWAYS, 1)),
-                     pinctrl=pinctrl_f(0, 0, 0, 10, 0, 0, 0)))
-    p.append(Program("test_wait_2", "wait irq, absolute and relative",
-                     words(i_wait(1, W_IRQ, 5), i_wait(0, W_IRQ, 2), i_wait(1, W_IRQ, 0x13),
-                           i_jmp(C_ALWAYS, 3))))
+    add("test_wait_0",
+        words(dss(i_wait(1, W_GPIO, 14), 2), i_set(S_PINS, 1), i_jmp(C_ALWAYS, 2)),
+        pinctrl=pinctrl_f(0, 1, 0, 0, 0, 0, 0))
+    add("test_wait_1",
+        words(i_wait(0, W_PIN, 3), i_jmp(C_ALWAYS, 1)),
+        pinctrl=pinctrl_f(0, 0, 0, 10, 0, 0, 0))
+    add("test_wait_2",
+        words(i_wait(1, W_IRQ, 5), i_wait(0, W_IRQ, 2), i_wait(1, W_IRQ, 0x13),
+              i_jmp(C_ALWAYS, 3)))
 
     # test_irq
-    p.append(Program("test_irq", "irq set, set rel, clear, wait",
-                     words(i_irq(0, 0, 3), i_irq(0, 0, 0x16), i_irq(1, 0, 3), i_irq(0, 1, 4),
-                           i_set(S_X, 30), i_jmp(C_ALWAYS, 5)),
-                     xfail=IRQ_XFAIL))
+    add("test_irq",
+        words(i_irq(0, 0, 3), i_irq(0, 0, 0x16), i_irq(1, 0, 3), i_irq(0, 1, 4),
+              i_set(S_X, 30), i_jmp(C_ALWAYS, 5)))
 
     # test_out_pc_and_mov_pc
-    p.append(Program("test_out_pc_and_mov_pc", "out pc, mov pc",
-                     {0: i_pull(0, 1), 1: i_out(O_PC, 5), 12: i_set(S_Y, 14),
-                      13: i_mov(MD_PC, MOP_NONE, MS_Y), 14: i_set(S_X, 1),
-                      15: i_jmp(C_ALWAYS, 15)}))
+    add("test_out_pc_and_mov_pc",
+        {0: i_pull(0, 1), 1: i_out(O_PC, 5), 12: i_set(S_Y, 14),
+         13: i_mov(MD_PC, MOP_NONE, MS_Y), 14: i_set(S_X, 1),
+         15: i_jmp(C_ALWAYS, 15)})
 
     # test_sm_restart
-    p.append(Program("test_sm_restart_0", "restart keeps x, y and the pc",
-                     words(i_pull(0, 1), i_set(S_X, 5), i_in(IN_X, 8), dss(i_set(S_Y, 6), 7),
-                           i_jmp(C_ALWAYS, 4)),
-                     shiftctrl=shiftctrl_f(0, 0, 1, 0, 0, 0)))
-    p.append(Program("test_sm_restart_1", "restart clears an irq wait",
-                     words(i_irq(0, 1, 2)), xfail=IRQ_XFAIL))
+    add("test_sm_restart_0",
+        words(i_pull(0, 1), i_set(S_X, 5), i_in(IN_X, 8), dss(i_set(S_Y, 6), 7),
+              i_jmp(C_ALWAYS, 4)),
+        shiftctrl=shiftctrl_f(0, 0, 1, 0, 0, 0))
+    add("test_sm_restart_1",
+        words(i_irq(0, 1, 2)))
 
     # test_data_width_limits
-    p.append(Program("test_data_width_limits", "bit counts above W, SET_BASE above W",
-                     words(i_pull(0, 1), i_out(O_X, 20), i_set(S_PINS, 1), i_in(IN_X, 24),
-                           i_jmp(C_ALWAYS, 4)),
-                     shiftctrl=shiftctrl_f(0, 0, 1, 1, 0, 0),
-                     pinctrl=pinctrl_f(0, 1, 0, 0, 0, 20, 0)))
+    add("test_data_width_limits",
+        words(i_pull(0, 1), i_out(O_X, 20), i_set(S_PINS, 1), i_in(IN_X, 24),
+              i_jmp(C_ALWAYS, 4)),
+        shiftctrl=shiftctrl_f(0, 0, 1, 1, 0, 0),
+        pinctrl=pinctrl_f(0, 1, 0, 0, 0, 20, 0))
 
     # test_uart_tx: the datasheet uart_tx program at divisors 1 and 3.
     uart = words(0x9FA0, 0xF727, 0x6001, 0x0642)
     for n, div in enumerate((1, 3)):
-        p.append(Program(f"test_uart_tx_{n}", f"datasheet uart_tx, divisor {div}", uart,
-                         clkdiv=div << 16,
-                         execctrl=execctrl_f(1, 0, 0, 3, 0, 0, 0),
-                         pinctrl=pinctrl_f(2, 0, 1, 0, 4, 0, 4)))
+        add(f"test_uart_tx_{n}", uart,
+            clkdiv=div << 16,
+            execctrl=execctrl_f(1, 0, 0, 3, 0, 0, 0),
+            pinctrl=pinctrl_f(2, 0, 1, 0, 4, 0, 4))
 
     # test_gpio_fault: FAULT_VEC is EXECCTRL[23:19].
     fv = 20
     fault_exec = execctrl_f(0, 0, 0, 31, 0, 0, 0) | (fv << 19)
-    p.append(Program("test_gpio_fault_0", "fault on a completed instruction",
-                     {0: i_set(S_PINDIRS, 1), 1: dss(i_set(S_PINS, 1), 3), 2: i_jmp(C_ALWAYS, 1),
-                      fv: i_set(S_PINS, 0), fv + 1: i_jmp(C_ALWAYS, fv + 1)},
-                     execctrl=fault_exec, pinctrl=pinctrl_f(0, 1, 0, 0, 0, 3, 0)))
-    p.append(Program("test_gpio_fault_1", "fault during delay cycles",
-                     {0: dss(i_set(S_X, 1), 5), 1: i_jmp(C_ALWAYS, 0), fv: i_jmp(C_ALWAYS, fv)},
-                     execctrl=fault_exec))
-    p.append(Program("test_gpio_fault_2", "fault while stalled in irq wait",
-                     {0: i_irq(0, 1, 0), fv: i_jmp(C_ALWAYS, fv)},
-                     execctrl=fault_exec, xfail=IRQ_XFAIL))
-    p.append(Program("test_gpio_fault_3", "FAULT_VEC 7",
-                     {7: i_jmp(C_ALWAYS, 7)},
-                     execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 0) | (7 << 19)))
+    add("test_gpio_fault_0",
+        {0: i_set(S_PINDIRS, 1), 1: dss(i_set(S_PINS, 1), 3), 2: i_jmp(C_ALWAYS, 1),
+         fv: i_set(S_PINS, 0), fv + 1: i_jmp(C_ALWAYS, fv + 1)},
+        execctrl=fault_exec, pinctrl=pinctrl_f(0, 1, 0, 0, 0, 3, 0))
+    add("test_gpio_fault_1",
+        {0: dss(i_set(S_X, 1), 5), 1: i_jmp(C_ALWAYS, 0), fv: i_jmp(C_ALWAYS, fv)},
+        execctrl=fault_exec)
+    add("test_gpio_fault_2",
+        {0: i_irq(0, 1, 0), fv: i_jmp(C_ALWAYS, fv)},
+        execctrl=fault_exec)
+    add("test_gpio_fault_3",
+        {7: i_jmp(C_ALWAYS, 7)},
+        execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 0) | (7 << 19))
 
     # test_pins_re
-    p.append(Program("test_pins_re_0", "pins read by each instruction",
-                     words(i_in(IN_PINS, 3), i_wait(1, W_GPIO, 9), i_wait(1, W_PIN, 2),
-                           i_jmp(C_PIN, 4), i_mov(MD_X, MOP_NONE, MS_PINS), i_set(S_PINS, 1),
-                           i_jmp(C_ALWAYS, 6)),
-                     execctrl=execctrl_f(0, 0, 9, 31, 0, 0, 0),
-                     pinctrl=pinctrl_f(0, 1, 0, 4, 0, 3, 0)))
-    p.append(Program("test_pins_re_1", "stalled wait keeps reporting its pin",
-                     words(i_wait(1, W_GPIO, 12))))
-    return p
+    add("test_pins_re_0",
+        words(i_in(IN_PINS, 3), i_wait(1, W_GPIO, 9), i_wait(1, W_PIN, 2),
+              i_jmp(C_PIN, 4), i_mov(MD_X, MOP_NONE, MS_PINS), i_set(S_PINS, 1),
+              i_jmp(C_ALWAYS, 6)),
+        execctrl=execctrl_f(0, 0, 9, 31, 0, 0, 0),
+        pinctrl=pinctrl_f(0, 1, 0, 4, 0, 3, 0))
+    add("test_pins_re_1",
+        words(i_wait(1, W_GPIO, 12)))
+    # tb_sm_uart.sv: prog_hex() and reset_all(24'h0100), with TX GPIO 6 and RX GPIO 2.
+    full_duplex_uart = words(
+        0xE001, 0xE081, 0xA02B, 0x8040, 0x80C0, 0x6001, 0x01C4, 0x80C0,
+        0x6001, 0xE147, 0x80C0, 0x6201, 0x80C0, 0x6201, 0x80C0, 0x6001,
+        0x4001, 0x008A, 0x80C0, 0x6201, 0x80C0, 0x6201, 0x80C0, 0x6001,
+        0x00C3, 0xC014, 0x80C0, 0x6001, 0x01C4, 0x001D, 0x001E, 0x001F,
+    )
+    add("tb_sm_uart", full_duplex_uart,
+        execctrl=execctrl_f(0, 0, 2, 28, 26, 0, 0),
+        shiftctrl=shiftctrl_f(8, 8, 1, 1, 0, 0),
+        pinctrl=pinctrl_f(0, 1, 1, 2, 0, 6, 6))
+    return images
 
 
 # ----------------------------------------------------------------------------
@@ -465,39 +474,64 @@ def assemble(source, output):
     return ""
 
 
+def read_programs(images):
+    programs = {}
+    for number, line in enumerate(MANIFEST.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, separator, metadata = line.partition("|")
+        description, _, xfail = metadata.partition("|")
+        name, description, xfail = name.strip(), description.strip(), xfail.strip()
+        if not separator or not description or name not in images:
+            raise ValueError(f"{MANIFEST.name}:{number}: expected a known program name and description")
+        if name in programs:
+            raise ValueError(f"{MANIFEST.name}:{number}: duplicate program {name!r}")
+        programs[name] = (description, xfail)
+    if not programs:
+        raise ValueError(f"{MANIFEST.name}: no programs listed")
+    return programs
+
+
 def main():
+    images = golden_programs()
+    try:
+        programs = read_programs(images)
+    except (OSError, ValueError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
     GOLDEN.mkdir(parents=True, exist_ok=True)
     GENERATED.mkdir(parents=True, exist_ok=True)
 
     log = []
     counts = {"PASS": 0, "FAIL": 0, "XFAIL": 0, "XPASS": 0}
-    program_list = programs()
-    width = max(len(p.name) for p in program_list)
+    width = max(map(len, programs))
 
-    for program in program_list:
-        golden = golden_image(program)
-        write_image(GOLDEN / f"{program.name}.hex", golden)
+    for name, (description, xfail) in programs.items():
+        golden = golden_image(images[name])
+        write_image(GOLDEN / f"{name}.hex", golden)
 
-        output = GENERATED / f"{program.name}.hex"
+        output = GENERATED / f"{name}.hex"
         output.unlink(missing_ok=True)
-        error = assemble(SOURCES / f"{program.name}.pio", output)
+        error = assemble(SOURCES / f"{name}.pio", output)
         details = [error] if error else compare(golden, read_image(output))
 
-        if program.xfail:
+        if xfail:
             status = "XFAIL" if details else "XPASS"
         else:
             status = "FAIL" if details else "PASS"
         counts[status] += 1
 
-        line = f"{program.name:<{width}}  {status:<5}  {program.description}"
-        if program.xfail:
-            line += f"  [expected to fail: {program.xfail}]"
+        line = f"{name:<{width}}  {status:<5}  {description}"
+        if xfail:
+            line += f"  [expected to fail: {xfail}]"
         log.append(line)
         log.extend(f"    {detail}" for detail in details)
 
     summary = ", ".join(f"{count} {status}" for status, count in counts.items())
     log.append("")
-    log.append(f"{len(program_list)} programs: {summary}")
+    log.append(f"{len(programs)} programs: {summary}")
     LOG.write_text("\n".join(log) + "\n", encoding="utf-8")
 
     print("\n".join(log))

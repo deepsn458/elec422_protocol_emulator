@@ -1,0 +1,55 @@
+# program name | description | optional expected failure reason
+test_set_and_wrap | squarewave_fast, wrap 2 -> 1
+test_delay | squarewave_wrap with [1] delays
+test_clock_divider_and_enable_0 | squarewave, divide by 3
+test_clock_divider_and_enable_1 | jmp ping-pong, divide by 2.5
+test_jmp_conditions_0 | jmp always
+test_jmp_conditions_1 | jmp !x, x = 0
+test_jmp_conditions_2 | jmp !x, x = 1
+test_jmp_conditions_3 | jmp x--, x = 1
+test_jmp_conditions_4 | jmp x--, x = 0
+test_jmp_conditions_5 | jmp !y, y = 0
+test_jmp_conditions_6 | jmp !y, y = 7
+test_jmp_conditions_7 | jmp y--, y = 2
+test_jmp_conditions_8 | jmp y--, y = 0
+test_jmp_conditions_9 | jmp x!=y, equal
+test_jmp_conditions_10 | jmp x!=y, different
+test_jmp_conditions_11 | jmp pin, pin high
+test_jmp_conditions_12 | jmp pin, pin low
+test_jmp_conditions_13 | jmp !osre, empty
+test_jmp_conditions_14 | jmp !osre, after pull
+test_jmp_conditions_15 | jmp !osre, 4 of 8 bits out
+test_jmp_conditions_16 | jmp !osre, 8 of 8 bits out
+test_jmp_x_dec_loop | x-- loop
+test_autopull_autopush_loopback | out x / in x, wrap 1 -> 0
+test_shift_and_pin_instructions_0 | OUT right, IN left
+test_shift_and_pin_instructions_1 | OUT left, IN right
+test_pull_blocking | pull noblock copies x, pull block stalls
+test_push_blocking | push noblock drops, push block stalls
+test_pull_push_thresholds | pull ifempty / push iffull, thresholds 8
+test_pull_with_autopull_0 | pull is a no-op while the OSR is full
+test_pull_with_autopull_1 | background autopull
+test_mov_0 | mov operations, sources and destinations
+test_mov_1 | mov x, status (TX level < 2)
+test_mov_2 | mov y, status (RX level < 1)
+test_sideset_0 | spi_tx_fast, side-set clock
+test_sideset_1 | optional side-set with delays
+test_sideset_2 | side-set wins over set
+test_sideset_3 | side-set to pin directions
+test_wait_0 | wait gpio with delay
+test_wait_1 | wait pin uses IN_BASE
+test_wait_2 | wait irq, absolute and relative
+test_irq | irq set, set rel, clear, wait | assembler emits NOP for IRQ (reserved)
+test_out_pc_and_mov_pc | out pc, mov pc
+test_sm_restart_0 | restart keeps x, y and the pc
+test_sm_restart_1 | restart clears an irq wait | assembler emits NOP for IRQ (reserved)
+test_data_width_limits | bit counts above W, SET_BASE above W
+test_uart_tx_0 | datasheet uart_tx, divisor 1
+test_uart_tx_1 | datasheet uart_tx, divisor 3
+test_gpio_fault_0 | fault on a completed instruction
+test_gpio_fault_1 | fault during delay cycles
+test_gpio_fault_2 | fault while stalled in irq wait | assembler emits NOP for IRQ (reserved)
+test_gpio_fault_3 | FAULT_VEC 7
+test_pins_re_0 | pins read by each instruction
+test_pins_re_1 | stalled wait keeps reporting its pin
+tb_sm_uart | full-duplex UART, divisor 1 | assembler emits NOP for IRQ (reserved)
