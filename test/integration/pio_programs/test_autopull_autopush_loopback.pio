@@ -1,0 +1,9 @@
+; tb_sm_no_smx_instr.sv test_autopull_autopush_loopback
+.program test_autopull_autopush_loopback
+.set_execctrl  0x00001000       ; wrap 1 -> 0
+.set_shiftctrl 0x000F0000       ; OUT/IN right, autopull, autopush
+
+.wrap_target
+    out x, 16
+    in x, 16
+.wrap

@@ -302,10 +302,6 @@ def validate_control_flow(instructions, words, max_lines, wrap_bottom, wrap_top)
               ((word >> 5) & 0x7) == 0b101):        # MOV/OUT destination PC
             jumps.add(address)
 
-    if wrap_top in jumps:
-        _, operands = instructions[wrap_top]
-        raise operands.fail(f"wrap end at address {wrap_top} clashes with a jump")
-
     # Follow known paths from the entry point. Conditional JMPs can take
     # either path, and unused instruction slots behave as NOPs.
     pending = [0]

@@ -1,0 +1,10 @@
+; tb_sm_no_smx_instr.sv test_pull_with_autopull: PULL is a no-op while the OSR is full.
+.program test_pull_with_autopull_0
+.set_shiftctrl 0x000E0000       ; OUT/IN right, autopull
+
+    pull block
+    pull block
+    out x, 32
+    nop
+done:
+    jmp done

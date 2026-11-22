@@ -1,0 +1,20 @@
+; tb_sm_no_smx_instr.sv test_out_pc_and_mov_pc: OUT PC jumps to 12, MOV PC to 14.
+.program test_out_pc_and_mov_pc
+
+    pull block          ; 0
+    out pc, 5           ; 1
+    nop                 ; 2-11: unused
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    set y, 14           ; 12
+    mov pc, y           ; 13
+    set x, 1            ; 14
+done:
+    jmp done            ; 15

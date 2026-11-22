@@ -1,0 +1,10 @@
+; tb_sm_no_smx_instr.sv test_sm_restart: restart keeps X, Y and the PC.
+.program test_sm_restart_0
+.set_shiftctrl 0x00080000       ; OUT right, IN left
+
+    pull block
+    set x, 5
+    in x, 8
+    set y, 6 [7]
+done:
+    jmp done

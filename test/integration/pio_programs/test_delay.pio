@@ -1,0 +1,10 @@
+; tb_sm_no_smx_instr.sv test_delay: squarewave_wrap, one delay cycle per level.
+.program test_delay
+.set_execctrl 0x00002080        ; wrap 2 -> 1
+.set_pinctrl  0x04000060        ; SET_COUNT 1, SET_BASE 3
+
+    set pindirs, 1
+.wrap_target
+    set pins, 1 [1]
+    set pins, 0 [1]
+.wrap

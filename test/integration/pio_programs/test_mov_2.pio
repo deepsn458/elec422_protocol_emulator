@@ -1,0 +1,7 @@
+; tb_sm_no_smx_instr.sv test_mov: mov y, status with RX level < 1.
+.program test_mov_2
+.set_execctrl 0x0001F011        ; STATUS: RX level < 1
+
+    mov y, status
+done:
+    jmp done

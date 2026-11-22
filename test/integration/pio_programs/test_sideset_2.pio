@@ -1,0 +1,9 @@
+; tb_sm_no_smx_instr.sv test_sideset: side-set wins over SET on the same pin.
+.program test_sideset_2
+.set_pinctrl 0x240018C0         ; side-set and SET on GPIO 6
+.side_set 1
+
+    set pins, 1 side 0
+    set pins, 0 side 1
+done:
+    jmp done    side 0

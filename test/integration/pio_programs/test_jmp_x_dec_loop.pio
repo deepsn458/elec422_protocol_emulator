@@ -1,0 +1,8 @@
+; tb_sm_no_smx_instr.sv test_jmp_x_dec_loop
+.program test_jmp_x_dec_loop
+
+    set x, 3
+loop:
+    jmp x--, loop
+done:
+    jmp done

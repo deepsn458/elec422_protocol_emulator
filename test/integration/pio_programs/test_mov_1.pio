@@ -1,0 +1,7 @@
+; tb_sm_no_smx_instr.sv test_mov: mov x, status with TX level < 2.
+.program test_mov_1
+.set_execctrl 0x0001F002        ; STATUS: TX level < 2
+
+    mov x, status
+done:
+    jmp done

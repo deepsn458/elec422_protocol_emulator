@@ -1,0 +1,11 @@
+; tb_sm_no_smx_instr.sv test_sideset: optional side-set (SIDE_EN) with delays.
+.program test_sideset_1
+.set_execctrl 0x4001F000        ; SIDE_EN
+.set_pinctrl  0x40001400        ; 2 side-set bits incl. enable, GPIO 5
+.side_set 1 opt
+
+    set x, 0 side 1 [2]
+    set x, 1 [1]
+    set x, 2 side 0
+done:
+    jmp done

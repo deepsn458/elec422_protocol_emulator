@@ -1,0 +1,27 @@
+; tb_sm_no_smx_instr.sv test_gpio_fault c: fault while stalled in IRQ WAIT.
+; Expected to fail: the assembler emits NOP for IRQ while it is reserved.
+.program test_gpio_fault_2
+.set_execctrl 0x00A1F000        ; FAULT_VEC 20
+
+    irq wait 0          ; 0
+    nop                 ; 1-19: unused
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+fault:
+    jmp fault           ; 20: FAULT_VEC

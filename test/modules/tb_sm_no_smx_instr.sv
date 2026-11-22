@@ -290,8 +290,9 @@ module tb_sm_no_smx_instr;
     endtask
 
     // Full reset with RP2040 reset values for the configuration variables.
-    // Every program slot holds "jmp <self>". X and Y are not reset. The SM
-    // stays in reset until boot(), which start() runs if a test hasn't.
+    // Every program slot holds a NOP, like the assembler's padding. X and Y
+    // are not reset. The SM stays in reset until boot(), which start() runs
+    // if a test hasn't.
     task automatic reset_all();
         rst = 1;
         sm_rst = 1;
@@ -310,7 +311,7 @@ module tb_sm_no_smx_instr;
         shiftctrl = 32'h000C_0000;
         pinctrl = 32'h1400_0000;
         for (int i = 0; i < 32; i++)
-            imem[i] = i_jmp(C_ALWAYS, i[4:0]);
+            imem[i] = NOP;
         step(2);
         rst = 0;
         cyc = 0;
@@ -367,13 +368,16 @@ module tb_sm_no_smx_instr;
     endtask
 
     // Run a jump with the given condition after up to three setup
-    // instructions. A taken jump lands on "jmp 10", a fall-through on "jmp 4".
+    // instructions. A taken jump lands on "jmp 10", a fall-through on "jmp 4";
+    // both jump to themselves so the PC stays put for the check.
     task automatic check_jmp(input [2:0] cond, input taken, input [15:0] s0,
                              input [15:0] s1, input [15:0] s2, input string what);
         imem[0] = s0;
         imem[1] = s1;
         imem[2] = s2;
         imem[3] = i_jmp(cond, 10);
+        imem[4] = i_jmp(C_ALWAYS, 4);
+        imem[10] = i_jmp(C_ALWAYS, 10);
         start();
         step(6);
         check(pc, taken ? 10 : 4, what);

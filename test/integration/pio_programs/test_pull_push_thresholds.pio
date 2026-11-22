@@ -1,0 +1,16 @@
+; tb_sm_no_smx_instr.sv test_pull_push_thresholds
+.program test_pull_push_thresholds
+.set_shiftctrl 0x10880000       ; PULL_THRESH 8, PUSH_THRESH 8, OUT right, IN left
+
+    pull block
+    out null, 4
+    pull ifempty block
+    out null, 4
+    pull ifempty block
+    set x, 3
+    in x, 4
+    push iffull block
+    in x, 4
+    push iffull block
+done:
+    jmp done

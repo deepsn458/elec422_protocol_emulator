@@ -1,0 +1,17 @@
+; tb_sm_no_smx_instr.sv test_jmp_conditions: check_jmp "jmp x!=y, different".
+; A taken jump stops at slot 10, a fall-through at slot 4.
+.program test_jmp_conditions_10
+
+    set x, 3            ; 0
+    set y, 4            ; 1
+    nop                 ; 2
+    jmp x!=y, taken     ; 3
+fall_through:
+    jmp fall_through    ; 4
+    nop                 ; 5-9: unused
+    nop
+    nop
+    nop
+    nop
+taken:
+    jmp taken           ; 10
