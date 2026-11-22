@@ -1,0 +1,7 @@
+; tb_sm_no_smx_instr.sv test_wait: WAIT PIN uses IN_BASE (pin 3 + 10 = GPIO 13).
+.program test_wait_1
+.set_pinctrl 0x00050000         ; IN_BASE 10
+
+    wait 0 pin 3
+done:
+    jmp done

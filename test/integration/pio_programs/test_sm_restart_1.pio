@@ -1,0 +1,5 @@
+; tb_sm_no_smx_instr.sv test_sm_restart: restart clears an IRQ wait.
+; Expected to fail: the assembler emits NOP for IRQ while it is reserved.
+.program test_sm_restart_1
+
+    irq wait 2

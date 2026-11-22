@@ -1,0 +1,14 @@
+; tb_sm_no_smx_instr.sv test_pins_re: the GPIOs each instruction reads.
+.program test_pins_re_0
+.set_execctrl 0x0901F000        ; JMP_PIN 9
+.set_pinctrl  0x04020060        ; IN_BASE 4, SET_COUNT 1, SET_BASE 3
+
+    in pins, 3
+    wait 1 gpio 9
+    wait 1 pin 2
+    jmp pin, next
+next:
+    mov x, pins
+    set pins, 1
+done:
+    jmp done

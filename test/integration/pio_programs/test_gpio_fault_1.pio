@@ -1,0 +1,27 @@
+; tb_sm_no_smx_instr.sv test_gpio_fault b: fault during delay cycles.
+.program test_gpio_fault_1
+.set_execctrl 0x00A1F000        ; FAULT_VEC 20
+
+loop:
+    set x, 1 [5]        ; 0
+    jmp loop            ; 1
+    nop                 ; 2-19: unused
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+fault:
+    jmp fault           ; 20: FAULT_VEC

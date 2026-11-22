@@ -1,0 +1,9 @@
+; tb_sm_no_smx_instr.sv test_sideset: SIDE_PINDIR drives pin directions.
+.program test_sideset_3
+.set_execctrl 0x2001F000        ; SIDE_PINDIR
+.set_pinctrl  0x240018C0        ; side-set and SET on GPIO 6
+.side_set 1 pindirs
+
+    set pins, 1 side 1
+done:
+    jmp done    side 0

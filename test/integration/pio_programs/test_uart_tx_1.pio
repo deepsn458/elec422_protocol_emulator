@@ -1,0 +1,14 @@
+; tb_sm_no_smx_instr.sv test_uart_tx: datasheet uart_tx at divisor 3.
+.program test_uart_tx_1
+.set_clkdiv   0x00030000        ; divide by 3
+.set_execctrl 0x40003000        ; SIDE_EN, wrap 3 -> 0
+.set_pinctrl  0x40101004        ; OUT and side-set on GPIO 4
+.side_set 1 opt
+
+.wrap_target
+    pull       side 1 [7]
+    set x, 7   side 0 [7]
+bitloop:
+    out pins, 1
+    jmp x--, bitloop   [6]
+.wrap

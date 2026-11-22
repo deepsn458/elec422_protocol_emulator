@@ -1,0 +1,13 @@
+; tb_sm_no_smx_instr.sv test_gpio_fault d: FAULT_VEC comes from EXECCTRL.
+.program test_gpio_fault_3
+.set_execctrl 0x0039F000        ; FAULT_VEC 7
+
+    nop                 ; 0-6: unused
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+fault:
+    jmp fault           ; 7: FAULT_VEC

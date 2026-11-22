@@ -1,0 +1,6 @@
+; tb_sm_no_smx_instr.sv test_clock_divider_and_enable: divide by 2.5.
+.program test_clock_divider_and_enable_1
+.set_clkdiv 0x00028000          ; INT 2, FRAC 0x80
+
+    jmp 1
+    jmp 0

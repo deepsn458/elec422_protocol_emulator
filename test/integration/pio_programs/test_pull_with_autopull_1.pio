@@ -1,0 +1,7 @@
+; tb_sm_no_smx_instr.sv test_pull_with_autopull: background autopull.
+.program test_pull_with_autopull_1
+.set_shiftctrl 0x000E0000       ; OUT/IN right, autopull
+
+    nop
+done:
+    jmp done

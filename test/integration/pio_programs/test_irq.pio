@@ -1,0 +1,11 @@
+; tb_sm_no_smx_instr.sv test_irq: set, set rel, clear, wait.
+; Expected to fail: the assembler emits NOP for IRQ while it is reserved.
+.program test_irq
+
+    irq set 3
+    irq set 6 rel
+    irq clear 3
+    irq wait 4
+    set x, 30
+done:
+    jmp done

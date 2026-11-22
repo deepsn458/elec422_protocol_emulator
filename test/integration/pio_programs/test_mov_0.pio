@@ -1,0 +1,15 @@
+; tb_sm_no_smx_instr.sv test_mov: operations, sources and destinations.
+.program test_mov_0
+.set_execctrl 0x0001F002        ; STATUS: TX level < 2
+.set_pinctrl  0x00860008        ; OUT GPIO 8..15, IN_BASE 12
+
+    set x, 1
+    mov y, ::x
+    mov isr, !y
+    mov osr, !null
+    mov x, isr
+    mov pins, x
+    mov y, pins
+    mov x, status
+done:
+    jmp done

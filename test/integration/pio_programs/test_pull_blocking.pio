@@ -1,0 +1,9 @@
+; tb_sm_no_smx_instr.sv test_pull_blocking
+.program test_pull_blocking
+
+    set x, 28
+    pull noblock
+    mov y, osr
+    pull block
+done:
+    jmp done

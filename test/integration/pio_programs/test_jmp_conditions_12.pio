@@ -1,0 +1,18 @@
+; tb_sm_no_smx_instr.sv test_jmp_conditions: check_jmp "jmp pin, pin low".
+; A taken jump stops at slot 10, a fall-through at slot 4.
+.program test_jmp_conditions_12
+.set_execctrl 0x0901F000        ; JMP_PIN 9
+
+    nop                 ; 0
+    nop                 ; 1
+    nop                 ; 2
+    jmp pin, taken      ; 3
+fall_through:
+    jmp fall_through    ; 4
+    nop                 ; 5-9: unused
+    nop
+    nop
+    nop
+    nop
+taken:
+    jmp taken           ; 10

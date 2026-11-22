@@ -1,0 +1,14 @@
+; tb_sm_no_smx_instr.sv test_shift_and_pin_instructions, dir 1: OUT left (MSB first), IN right.
+.program test_shift_and_pin_instructions_1
+.set_shiftctrl 0x00040000
+.set_pinctrl   0x10440108       ; OUT, SET, IN on GPIO 8..11
+
+    set pindirs, 15
+    pull block
+    out pins, 4
+    in pins, 4
+    out pins, 4
+    in pins, 4
+    push block
+done:
+    jmp done

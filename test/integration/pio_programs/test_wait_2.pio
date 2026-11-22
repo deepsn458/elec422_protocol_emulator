@@ -1,0 +1,8 @@
+; tb_sm_no_smx_instr.sv test_wait: WAIT IRQ, absolute and relative.
+.program test_wait_2
+
+    wait 1 irq 5
+    wait 0 irq 2
+    wait 1 irq 3 rel
+done:
+    jmp done

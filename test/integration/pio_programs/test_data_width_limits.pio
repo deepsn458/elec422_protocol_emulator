@@ -1,0 +1,11 @@
+; tb_sm_no_smx_instr.sv test_data_width_limits: counts above W, SET_BASE above W.
+.program test_data_width_limits
+.set_shiftctrl 0x000C0000       ; OUT/IN right
+.set_pinctrl   0x04000280       ; SET_COUNT 1, SET_BASE 20
+
+    pull block
+    out x, 20
+    set pins, 1
+    in x, 24
+done:
+    jmp done

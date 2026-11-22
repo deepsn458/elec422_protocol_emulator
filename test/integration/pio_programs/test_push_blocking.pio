@@ -1,0 +1,10 @@
+; tb_sm_no_smx_instr.sv test_push_blocking
+.program test_push_blocking
+
+    set x, 9
+    in x, 32
+    push noblock
+    in x, 32
+    push block
+done:
+    jmp done

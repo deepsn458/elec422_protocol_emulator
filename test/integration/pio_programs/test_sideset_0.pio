@@ -1,0 +1,9 @@
+; tb_sm_no_smx_instr.sv test_sideset: spi_tx_fast, data on GPIO 3, clock on GPIO 2.
+.program test_sideset_0
+.set_shiftctrl 0x100E0000       ; autopull every 8 bits, OUT/IN right
+.set_pinctrl   0x20100803       ; side-set GPIO 2, OUT GPIO 3
+.side_set 1
+
+loop:
+    out pins, 1 side 0
+    jmp loop    side 1

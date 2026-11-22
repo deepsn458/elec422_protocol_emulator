@@ -13,3 +13,4 @@ test/__pycache__/
 test/**/__pycache__/
 test/results.xml
 test/gate_level_netlist.v
+test/integration/assembler_test_outputs/
