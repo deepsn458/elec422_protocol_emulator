@@ -76,6 +76,23 @@ $(SIM_OUTPUTS)/integration/sv/spi_imem_sm.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_spi
 	mkdir -p $(@D)
 	iverilog -g2012 -DSV_TEST -DFUNCTIONAL -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/integration/sv/spi_imem_sm.$(WAVEFORM_EXT)\" $(RTL_LIB_ARGS) -s tb_spi_imem_sm -o $@ $< $(SRAM_MODEL_SOURCES)
 
+# The imem -> SM -> FIFOs / GPIO test also uses the SRAM model, and preloads
+# it with the assembler's hex images, which assembler_test.py regenerates
+# before every run (the images are read at run time, not compiled in).
+ASM_OUTPUTS = $(INT_DIR)/assembler_test_outputs
+.PHONY: imem_hex
+imem_hex:
+	@python3 $(INT_DIR)/assembler_test.py > /dev/null && echo "assembler: hex images regenerated" \
+		|| { tail -n 20 $(ASM_OUTPUTS)/assembler_test.log; exit 1; }
+
+sim_int_imem_to_gpio: imem_hex
+
+$(SIM_OUTPUTS)/integration/sv/imem_to_gpio.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_imem_to_gpio.sv $(RTL_LIB_SOURCES) $(SRAM_MODEL_SOURCES)
+	mkdir -p $(@D)
+	iverilog -g2012 -DSV_TEST -DFUNCTIONAL -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/integration/sv/imem_to_gpio.$(WAVEFORM_EXT)\" \
+		-DHEX_DIR=\"$(ASM_OUTPUTS)/generated\" -DGOLDEN_DIR=\"$(ASM_OUTPUTS)/golden\" -DPROG_LIST=\"$(INT_DIR)/programs.txt\" \
+		$(RTL_LIB_ARGS) -s tb_imem_to_gpio -o $@ $< $(SRAM_MODEL_SOURCES)
+
 $(INT_COCOTB_TARGETS): cocotb_int_%:
 	$(MAKE) --no-print-directory FLOW=cocotb INTEGRATION_NAME=$* sim
 	test -f $(SIM_OUTPUTS)/integration/cocotb/$*/results.xml
