@@ -46,10 +46,10 @@ test_sm_restart_1 | restart clears an irq wait | assembler emits NOP for IRQ (re
 test_data_width_limits | bit counts above W, SET_BASE above W
 test_uart_tx_0 | datasheet uart_tx, divisor 1
 test_uart_tx_1 | datasheet uart_tx, divisor 3
-test_gpio_fault_0 | fault on a completed instruction
-test_gpio_fault_1 | fault during delay cycles
-test_gpio_fault_2 | fault while stalled in irq wait | assembler emits NOP for IRQ (reserved)
-test_gpio_fault_3 | FAULT_VEC 7
+test_gpio_fault_0 | drive fault on a completed instruction with a delay
+test_gpio_fault_1 | read fault on WAIT, none during the delay before it
+test_gpio_fault_2 | side-set drive fault on the first IRQ WAIT cycle | assembler emits NOP for IRQ (reserved)
+test_gpio_fault_3 | FAULT_VEC 7, direction fault
 test_pins_re_0 | pins read by each instruction
 test_pins_re_1 | stalled wait keeps reporting its pin
 tb_sm_uart | full-duplex UART, divisor 1 | assembler emits NOP for IRQ (reserved)

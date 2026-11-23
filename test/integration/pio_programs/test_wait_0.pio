@@ -1,8 +1,8 @@
 ; tb_sm_no_smx_instr.sv test_wait: WAIT GPIO; delay cycles start after the wait.
 .program test_wait_0
-.set_pinctrl 0x04000000         ; SET_COUNT 1, SET_BASE 0
+.set_pinctrl 0x04000180         ; SET_COUNT 1, SET_BASE 12 (output only)
 
-    wait 1 gpio 14 [2]
+    wait 1 gpio 2 [2]           ; GPIO 2: input only
     set pins, 1
 done:
     jmp done

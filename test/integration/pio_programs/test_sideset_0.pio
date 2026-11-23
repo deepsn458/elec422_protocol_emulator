@@ -1,7 +1,8 @@
-; tb_sm_no_smx_instr.sv test_sideset: spi_tx_fast, data on GPIO 3, clock on GPIO 2.
+; tb_sm_no_smx_instr.sv test_sideset: spi_tx_fast, data on GPIO 13, clock on GPIO 12
+; (output-only pins in the default GPIO map).
 .program test_sideset_0
 .set_shiftctrl 0x100E0000       ; autopull every 8 bits, OUT/IN right
-.set_pinctrl   0x20100803       ; side-set GPIO 2, OUT GPIO 3
+.set_pinctrl   0x2010300D       ; side-set GPIO 12, OUT GPIO 13
 .side_set 1
 
 loop:
