@@ -18,6 +18,11 @@ An image is 32 instruction slots (unused slots are NOP, as in reset_all())
 followed by CLKDIV, EXECCTRL, SHIFTCTRL and PINCTRL, low halfword first, as in
 write_cfg(). The golden images can be loaded into a testbench with $readmemh.
 
+tb_imem_to_gpio.sv runs these images with the real GPIO controller and its
+default pin map (GPIO 0-3 input only, 4-11 bidirectional, 12-15 output only),
+so programs that used other pins in tb_sm_no_smx_instr.sv are moved onto pins
+that support the access, and the test_gpio_fault programs raise real faults.
+
 The exit status is 1 if any program FAILs or XPASSes, otherwise 0.
 programs.txt lists the cases in run order.
 """
@@ -147,10 +152,10 @@ def golden_programs():
     def add(name, imem, **config):
         images[name] = GoldenProgram(imem, **config)
 
-    # test_set_and_wrap: squarewave_fast, wrap 2 -> 1, SET on GPIO 3.
+    # test_set_and_wrap: squarewave_fast, wrap 2 -> 1, SET on GPIO 4.
     square = words(i_set(S_PINDIRS, 1), i_set(S_PINS, 1), i_set(S_PINS, 0))
     square_exec = execctrl_f(0, 0, 0, 2, 1, 0, 0)
-    square_pins = pinctrl_f(0, 1, 0, 0, 0, 3, 0)
+    square_pins = pinctrl_f(0, 1, 0, 0, 0, 4, 0)
     add("test_set_and_wrap", square,
         execctrl=square_exec, pinctrl=square_pins)
 
@@ -262,7 +267,7 @@ def golden_programs():
     add("test_sideset_0",
         words(dss(i_out(O_PINS, 1), 0b00000), dss(i_jmp(C_ALWAYS, 0), 0b10000)),
         shiftctrl=shiftctrl_f(8, 0, 1, 1, 1, 0),
-        pinctrl=pinctrl_f(1, 0, 1, 0, 2, 0, 3))
+        pinctrl=pinctrl_f(1, 0, 1, 0, 12, 0, 13))
     add("test_sideset_1",
         words(dss(i_set(S_X, 0), 0b11010), dss(i_set(S_X, 1), 0b00001),
               dss(i_set(S_X, 2), 0b10000), i_jmp(C_ALWAYS, 3)),
@@ -279,11 +284,11 @@ def golden_programs():
 
     # test_wait
     add("test_wait_0",
-        words(dss(i_wait(1, W_GPIO, 14), 2), i_set(S_PINS, 1), i_jmp(C_ALWAYS, 2)),
-        pinctrl=pinctrl_f(0, 1, 0, 0, 0, 0, 0))
+        words(dss(i_wait(1, W_GPIO, 2), 2), i_set(S_PINS, 1), i_jmp(C_ALWAYS, 2)),
+        pinctrl=pinctrl_f(0, 1, 0, 0, 0, 12, 0))
     add("test_wait_1",
         words(i_wait(0, W_PIN, 3), i_jmp(C_ALWAYS, 1)),
-        pinctrl=pinctrl_f(0, 0, 0, 10, 0, 0, 0))
+        pinctrl=pinctrl_f(0, 0, 0, 5, 0, 0, 0))
     add("test_wait_2",
         words(i_wait(1, W_IRQ, 5), i_wait(0, W_IRQ, 2), i_wait(1, W_IRQ, 0x13),
               i_jmp(C_ALWAYS, 3)))
@@ -322,22 +327,24 @@ def golden_programs():
             execctrl=execctrl_f(1, 0, 0, 3, 0, 0, 0),
             pinctrl=pinctrl_f(2, 0, 1, 0, 4, 0, 4))
 
-    # test_gpio_fault: FAULT_VEC is EXECCTRL[23:19].
+    # test_gpio_fault: FAULT_VEC is EXECCTRL[23:19]. Each program makes a pin
+    # access the default pin map does not allow (tb_imem_to_gpio.sv).
     fv = 20
     fault_exec = execctrl_f(0, 0, 0, 31, 0, 0, 0) | (fv << 19)
-    add("test_gpio_fault_0",
-        {0: i_set(S_PINDIRS, 1), 1: dss(i_set(S_PINS, 1), 3), 2: i_jmp(C_ALWAYS, 1),
-         fv: i_set(S_PINS, 0), fv + 1: i_jmp(C_ALWAYS, fv + 1)},
-        execctrl=fault_exec, pinctrl=pinctrl_f(0, 1, 0, 0, 0, 3, 0))
-    add("test_gpio_fault_1",
-        {0: dss(i_set(S_X, 1), 5), 1: i_jmp(C_ALWAYS, 0), fv: i_jmp(C_ALWAYS, fv)},
+    add("test_gpio_fault_0",                     # drive GPIO 0 (input only)
+        {0: i_set(S_PINDIRS, 1), 1: i_set(S_PINS, 1), 2: dss(i_out(O_PINS, 1), 3),
+         3: i_jmp(C_ALWAYS, 1), fv: i_set(S_PINS, 0), fv + 1: i_jmp(C_ALWAYS, fv + 1)},
+        execctrl=fault_exec, pinctrl=pinctrl_f(0, 1, 1, 0, 0, 4, 0))
+    add("test_gpio_fault_1",                     # read GPIO 13 (output only)
+        {0: dss(i_set(S_X, 1), 5), 1: i_wait(1, W_GPIO, 13), fv: i_jmp(C_ALWAYS, fv)},
         execctrl=fault_exec)
-    add("test_gpio_fault_2",
-        {0: i_irq(0, 1, 0), fv: i_jmp(C_ALWAYS, fv)},
-        execctrl=fault_exec)
-    add("test_gpio_fault_3",
-        {7: i_jmp(C_ALWAYS, 7)},
-        execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 0) | (7 << 19))
+    add("test_gpio_fault_2",                     # side-set GPIO 0 (input only)
+        {0: dss(i_irq(0, 1, 0), 0b11000), fv: i_jmp(C_ALWAYS, fv)},
+        execctrl=fault_exec | (1 << 30), pinctrl=pinctrl_f(2, 0, 0, 0, 0, 0, 0))
+    add("test_gpio_fault_3",                     # direction of GPIO 12 (output only)
+        {3: i_set(S_PINDIRS, 1), 7: i_jmp(C_ALWAYS, 7)},
+        execctrl=execctrl_f(0, 0, 0, 31, 0, 0, 0) | (7 << 19),
+        pinctrl=pinctrl_f(0, 1, 0, 0, 0, 12, 0))
 
     # test_pins_re
     add("test_pins_re_0",
@@ -345,9 +352,9 @@ def golden_programs():
               i_jmp(C_PIN, 4), i_mov(MD_X, MOP_NONE, MS_PINS), i_set(S_PINS, 1),
               i_jmp(C_ALWAYS, 6)),
         execctrl=execctrl_f(0, 0, 9, 31, 0, 0, 0),
-        pinctrl=pinctrl_f(0, 1, 0, 4, 0, 3, 0))
+        pinctrl=pinctrl_f(0, 1, 0, 4, 0, 12, 0))
     add("test_pins_re_1",
-        words(i_wait(1, W_GPIO, 12)))
+        words(i_wait(1, W_GPIO, 10)))
     # tb_sm_uart.sv: prog_hex() and reset_all(24'h0100), with TX GPIO 6 and RX GPIO 2.
     full_duplex_uart = words(
         0xE001, 0xE081, 0xA02B, 0x8040, 0x80C0, 0x6001, 0x01C4, 0x80C0,

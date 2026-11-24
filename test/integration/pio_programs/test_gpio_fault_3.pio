@@ -1,12 +1,14 @@
-; tb_sm_no_smx_instr.sv test_gpio_fault d: FAULT_VEC comes from EXECCTRL.
+; tb_imem_to_gpio.sv test_gpio_fault 3: FAULT_VEC comes from EXECCTRL; a
+; direction fault on an output-only GPIO.
 .program test_gpio_fault_3
 .set_execctrl 0x0039F000        ; FAULT_VEC 7
+.set_pinctrl  0x04000180        ; SET_COUNT 1, SET_BASE 12 (output only)
 
-    nop                 ; 0-6: unused
+    nop                 ; 0-2: unused
     nop
     nop
-    nop
-    nop
+    set pindirs, 1      ; 3: GPIO 12 direction is fixed: dir fault
+    nop                 ; 4-6: unused
     nop
     nop
 fault:

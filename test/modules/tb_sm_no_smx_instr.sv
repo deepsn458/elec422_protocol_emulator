@@ -306,6 +306,7 @@ module tb_sm_no_smx_instr;
         host_irq_set = 0;
         host_irq_clr = 0;
         ext_in = 0;
+        gpio_fault = 0;
         clkdiv = 32'h0001_0000;
         execctrl = 32'h0001_F000;
         shiftctrl = 32'h000C_0000;
@@ -1383,11 +1384,8 @@ module tb_sm_no_smx_instr;
         test_sm_restart();
         test_data_width_limits();
         test_uart_tx();
-<<<<<<< HEAD
-=======
         test_gpio_fault();
         test_pins_re();
->>>>>>> c8cd943 (gpio_controller: pin registers and run-time pin access checks)
 
         $display("SM SystemVerilog test passed");
         $finish;

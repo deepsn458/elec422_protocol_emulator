@@ -1,4 +1,4 @@
 ; tb_sm_no_smx_instr.sv test_pins_re: a stalled WAIT keeps reporting its pin.
 .program test_pins_re_1
 
-    wait 1 gpio 12
+    wait 1 gpio 10              ; bidirectional, readable

@@ -6,7 +6,10 @@
     * clk: clock input
     * rst: reset input
 * Outputs:
-    * d_out: 32-bit output word
+    * d_out: 32-bit output word, registered: updates on the edge that pops it
+    * head: the oldest word, combinational (valid when not empty). Interim
+      first-word fall-through read for the state machine's TX FIFO until
+      the FIFO itself is made fall-through.
     * full: signal asserted if the fifo is full
     * empty: signal asserted if the fifo is empty
     * w_ptr: the current position of the write pointer
@@ -22,6 +25,7 @@ module fifo #(
     input wire w_en,
     input wire r_en,
     output reg [DATA_WIDTH-1:0] d_out,
+    output wire [DATA_WIDTH-1:0] head,
     output reg [DEPTH_BITS:0] wptr,
     output reg [DEPTH_BITS:0] rptr
     );
@@ -30,6 +34,7 @@ module fifo #(
     reg full, empty;
     assign empty = (wptr == rptr);
     assign full = ({~wptr[DEPTH_BITS], wptr[DEPTH_BITS-1:0]} == rptr);
+    assign head = mem[rptr[DEPTH_BITS-1:0]];
 
     //write data
     always_ff @(posedge clk ) begin
