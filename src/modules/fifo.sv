@@ -32,7 +32,7 @@ module fifo #(
     assign full = ({~wptr[DEPTH_BITS], wptr[DEPTH_BITS-1:0]} == rptr);
 
     //write data
-    always @ (posedge clk) begin
+    always_ff @(posedge clk ) begin
         if (rst) begin
             wptr <= '0;
         end else if (w_en & !full) begin
@@ -41,13 +41,16 @@ module fifo #(
         end
     end
 
+    // Expose the oldest word before the read clock edge.
+    always_comb begin
+        d_out = empty ? '0 : mem[rptr[DEPTH_BITS-1:0]];
+    end
+
     //read data
-    always @ (posedge clk) begin
+    always_ff @(posedge clk) begin
         if (rst) begin
             rptr <= '0;
-            d_out <= '0;
-        end else if (r_en & !empty) begin
-            d_out <= mem[rptr[DEPTH_BITS-1:0]];
+        end else if (r_en && !empty) begin
             rptr <= rptr + 1;
         end
     end
