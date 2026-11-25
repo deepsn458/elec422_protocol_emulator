@@ -26,7 +26,7 @@ SM_SIM_EXES = $(addprefix $(SIM_OUTPUTS)/modules/sv/,$(addsuffix .$(WAVEFORM_EXT
 # file is named <module>.sv is found without listing it.
 INT_SRC_DIR = $(SRC_DIR)/integration
 INT_DIR = $(CURDIR)/integration
-RTL_LIB_ARGS = -y $(SRC_DIR)/modules -y $(INT_SRC_DIR) -Y .sv -I$(SRC_DIR)/modules -I$(INT_SRC_DIR)
+RTL_LIB_ARGS = -y $(SRC_DIR)/modules -y $(INT_SRC_DIR) -Y .sv -I$(SRC_DIR)/modules -I$(INT_SRC_DIR) -I$(INT_DIR)
 RTL_LIB_SOURCES = $(wildcard $(SRC_DIR)/modules/*.sv) $(wildcard $(INT_SRC_DIR)/*.sv)
 INT_NAMES = $(patsubst tb_%.sv,%,$(notdir $(wildcard $(INT_DIR)/tb_*.sv)))
 INT_SIM_TARGETS = $(addprefix sim_int_,$(INT_NAMES))
@@ -75,6 +75,11 @@ $(SIM_OUTPUTS)/integration/sv/%.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_%.sv $(RTL_LI
 $(SIM_OUTPUTS)/integration/sv/spi_imem_sm.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_spi_imem_sm.sv $(RTL_LIB_SOURCES) $(SRAM_MODEL_SOURCES)
 	mkdir -p $(@D)
 	iverilog -g2012 -DSV_TEST -DFUNCTIONAL -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/integration/sv/spi_imem_sm.$(WAVEFORM_EXT)\" $(RTL_LIB_ARGS) -s tb_spi_imem_sm -o $@ $< $(SRAM_MODEL_SOURCES)
+
+# SM <-> instruction memory (sm_integration.md) also uses the SRAM model.
+$(SIM_OUTPUTS)/integration/sv/sm_imem.$(WAVEFORM_EXT).vvp: $(INT_DIR)/tb_sm_imem.sv $(INT_DIR)/sm_tb_common.svh $(RTL_LIB_SOURCES) $(SRAM_MODEL_SOURCES)
+	mkdir -p $(@D)
+	iverilog -g2012 -DSV_TEST -DFUNCTIONAL -DTB_DUMPFILE=\"$(SIM_OUTPUTS)/integration/sv/sm_imem.$(WAVEFORM_EXT)\" $(RTL_LIB_ARGS) -s tb_sm_imem -o $@ $< $(SRAM_MODEL_SOURCES)
 
 # The imem -> SM -> FIFOs / GPIO test also uses the SRAM model, and preloads
 # it with the assembler's hex images, which assembler_test.py regenerates
